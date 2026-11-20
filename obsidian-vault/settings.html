@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 12px; font: 13px/1.55 -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif; color: inherit; }
+  .field { margin-bottom: 12px; }
+  .field label { display: block; font-weight: 600; margin-bottom: 4px; font-size: 12.5px; }
+  .hint { font-size: 11.5px; opacity: 0.72; margin-top: 3px; }
+  input, select {
+    width: 100%;
+    padding: 7px 10px;
+    border-radius: 7px;
+    border: 1px solid var(--border-default, rgba(128,128,128,0.3));
+    background: var(--surface, rgba(128,128,128,0.08));
+    color: inherit;
+    font: inherit;
+  }
+  .actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 14px; }
+  button {
+    padding: 7px 14px;
+    border-radius: 7px;
+    border: 1px solid var(--border-default, rgba(128,128,128,0.35));
+    background: var(--surface, rgba(128,128,128,0.12));
+    color: inherit;
+    font: inherit;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  #msg { font-size: 12px; opacity: 0.85; }
+</style>
+<body>
+  <div class="field">
+    <label for="defaultVault">默认 Obsidian 知识库（名称或绝对路径）</label>
+    <input id="defaultVault" placeholder="留空则自动使用 Obsidian 最近打开的 Vault">
+    <div class="hint">插件会自动检测本机 obsidian.json 中已注册的知识库；你也可以在工作台右上角点击「切换库」通过系统目录选择器添加。</div>
+  </div>
+  <div class="field">
+    <label for="inboxFolder">默认收件箱目录 (Inbox)</label>
+    <input id="inboxFolder" placeholder="Inbox">
+    <div class="hint">消息一键入库或 /obsidian-capture 未指定目录时默认存入的子文件夹。</div>
+  </div>
+  <div class="field">
+    <label for="dailyFolder">日记目录覆盖（可选）</label>
+    <input id="dailyFolder" placeholder="留空则自动读取 Vault 内 .obsidian/daily-notes.json">
+  </div>
+  <div class="field">
+    <label for="insertStyle">输入框 @ 引用插入格式</label>
+    <select id="insertStyle">
+      <option value="wikilink">Obsidian 双链 [[笔记名]] + 路径（推荐）</option>
+      <option value="path">仅相对路径 [Obsidian: 路径.md]</option>
+    </select>
+  </div>
+  <div class="actions">
+    <button id="save" type="button">保存设置</button>
+    <span id="msg" role="status"></span>
+  </div>
+  <script src="/settings.js"></script>
+</body>
+</html>

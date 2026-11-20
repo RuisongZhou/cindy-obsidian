@@ -1,0 +1,622 @@
+{
+  "schemaVersion": 3,
+  "minCindyVersion": "0.1.141",
+  "id": "obsidian-vault",
+  "name": "Obsidian 知识库",
+  "description": "深度连接本机 Obsidian 知识库：支持 @ 实时搜笔记、双链图谱遍历、按章节非破坏性编辑、日记沉淀与消息一键入库。",
+  "whenToUse": "用户想查询、搜索、阅读、整理、创建或修改 Obsidian 笔记与知识库（Vault）、每日日记（Daily Note）、双链与反向链接、标签属性、Canvas 思维白板，或将对话结论存入第二大脑时找我",
+  "icon": "assets/icon.png",
+  "readme": {
+    "en": "README.md",
+    "zh-CN": "README.zh-CN.md"
+  },
+  "locales": {
+    "en": "locales/en.json",
+    "zh-CN": "locales/zh-CN.json"
+  },
+  "version": "1.0.1",
+  "releaseNotes": "安全与数据完整性加固：限制已注册 Vault 边界与符号链接防越界、原子写盘与并发互斥、原样保留未改动 YAML Frontmatter、跳过代码块识别 Markdown 章节、支持 Canvas 增量合并与多语言工具说明。",
+  "entry": "main.js",
+  "launch": "on-demand",
+  "command": "obsidian",
+  "confirm": true,
+  "pick": true,
+  "settingsHtml": "settings.html",
+  "node": {
+    "entry": "node/worker.cjs",
+    "protocol": "json-rpc-stdio",
+    "lifecycle": "on-demand",
+    "idleTimeoutSeconds": 120
+  },
+  "manual": {
+    "items": [
+      {
+        "dir": "manual/guide",
+        "name": "guide",
+        "description": "多工具编排原则：知识图谱检索、章节级非破坏性编辑与 Canvas 白板生成指南"
+      }
+    ]
+  },
+  "skill": {
+    "items": [
+      {
+        "dir": "skills/obsidian-capture",
+        "name": "obsidian-capture",
+        "description": "将当前对话结论、网页调研或代码方案提炼为结构化 Obsidian 笔记，自动搜索既有相关笔记建立 [[双链]] 与 YAML Frontmatter 属性后存入知识库。"
+      },
+      {
+        "dir": "skills/obsidian-daily",
+        "name": "obsidian-daily",
+        "description": "读取、汇总或更新 Obsidian 今日日记（Daily Note），支持早间待办梳理、晚间工作复盘以及将近期新增笔记关联进今日记录。"
+      }
+    ]
+  },
+  "tools": [
+    {
+      "name": "vault_status",
+      "description": "查看本机已登记的 Obsidian 知识库（Vault）列表、当前激活库统计（笔记数、双链数、未完待办、高频 #标签、日记与收件箱目录配置、近期修改笔记）及 Obsidian CLI 在线状态。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "vault": {
+            "type": "string",
+            "description": "可选：指定已登记知识库的 ID、名称或路径；省略时使用默认库"
+          },
+          "refresh": {
+            "type": "boolean",
+            "description": "可选：是否强制重新扫描磁盘索引"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "search_notes",
+      "description": "在 Obsidian 知识库中组合检索笔记：支持关键词全文/标题/别名匹配、目录前缀、#嵌套标签与 YAML Frontmatter 属性过滤，返回相关性排序与摘要片段。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "搜索关键词（多个词以空格分隔，同时匹配标题、别名、标签、章节与正文）"
+          },
+          "folder": {
+            "type": "string",
+            "description": "限定子目录前缀，例如 Projects 或 AIOS"
+          },
+          "tag": {
+            "type": "string",
+            "description": "按标签过滤（支持嵌套标签前缀，无需带 # 号）"
+          },
+          "propertyKey": {
+            "type": "string",
+            "description": "按 YAML Frontmatter 属性名过滤，例如 author 或 status"
+          },
+          "propertyValue": {
+            "type": "string",
+            "description": "Frontmatter 属性值包含的文本"
+          },
+          "limit": {
+            "type": "number",
+            "description": "返回条数上限（1–50，默认 15）"
+          },
+          "refresh": {
+            "type": "boolean",
+            "description": "可选：搜索前是否强制刷新缓存索引"
+          },
+          "vault": {
+            "type": "string",
+            "description": "可选：已登记的目标知识库 ID 或名称"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "read_note",
+      "description": "读取单篇 Obsidian 笔记正文（或指定 Markdown 章节，包含其子章节直到下一同级标题），同时解析返回其 YAML Frontmatter、#标签、章节大纲、待办统计、[[出链]] 与反向链接（Backlinks）。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "精确笔记相对路径（如 AIOS/调研.md，不做模糊猜测）；未知完整路径时请改传 title"
+          },
+          "title": {
+            "type": "string",
+            "description": "笔记标题、别名或 [[双链名]]（自动按 Obsidian 规则定位；若重名会提示候选路径）"
+          },
+          "heading": {
+            "type": "string",
+            "description": "可选：仅读取该 Markdown 章节标题下的内容（支持带 ## 层级消歧，自动忽略代码块内的 # 注释）"
+          },
+          "maxChars": {
+            "type": "number",
+            "description": "最大返回字符数（500–120000，默认 40000）"
+          },
+          "vault": {
+            "type": "string",
+            "description": "可选：已登记的目标知识库 ID 或名称"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "write_note",
+      "description": "创建或非破坏性编辑 Obsidian 笔记：支持新建、末尾/开头追加、按 Markdown 标题章节追加/前置/替换（replace-section 替换该标题至下一同级或更高级标题之间的范围，自动忽略围栏代码块中的 # 行）、无损更新 YAML Frontmatter 键值，以及经用户弹窗确认后覆盖或移入 .trash 回收站。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "目标 .md 笔记相对路径（如 Inbox/总结.md，自动补齐 .md）"
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "create",
+              "append",
+              "prepend",
+              "append-heading",
+              "prepend-heading",
+              "replace-section",
+              "update-frontmatter",
+              "overwrite",
+              "delete"
+            ],
+            "description": "写入模式：修改既有笔记优先用 append / append-heading / replace-section / update-frontmatter（未改动的 Frontmatter 区块逐字节保留）；overwrite 与 delete 会先弹出宿主确认框"
+          },
+          "heading": {
+            "type": "string",
+            "description": "当 mode 为 append-heading / prepend-heading / replace-section 时必填的目标章节名（同名章节可带 ## 层级消歧；不存在时自动在末尾安全新建二级标题）"
+          },
+          "content": {
+            "type": "string",
+            "description": "要写入或追加的 Markdown 正文（支持 [[双链]]、#标签、Callout）"
+          },
+          "frontmatter": {
+            "type": "object",
+            "description": "可选：要按顶层键增量合并写入 YAML Frontmatter 的标量/标量数组对象（传 null 值可移除对应键）"
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "可选：要合并加入 Frontmatter tags 的标签数组"
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "maxLength": 128,
+            "description": "可选：跨重试防重复追加的幂等请求编号"
+          },
+          "vault": {
+            "type": "string",
+            "description": "可选：已登记的目标知识库 ID 或名称"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "daily_note",
+      "description": "读取、自动初始化或向 Obsidian 每日日记（Daily Note，遵循 .obsidian/daily-notes.json 或插件设置中的目录、日期格式与模板）单次原子追加时间戳记录或待办事项。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "read",
+              "ensure",
+              "append",
+              "add-task"
+            ],
+            "description": "read=仅只读查看（不存在时不落盘）；ensure=不存在则按模板初始化；append=追加带时间戳的记录；add-task=追加 - [ ] 待办"
+          },
+          "date": {
+            "type": "string",
+            "description": "可选：严格的 YYYY-MM-DD 日历日期，省略时使用本机当前日期"
+          },
+          "content": {
+            "type": "string",
+            "description": "当 action 为 append 或 add-task 时必填的文本内容"
+          },
+          "heading": {
+            "type": "string",
+            "description": "可选：追加到日记内的指定章节标题下"
+          },
+          "timestamp": {
+            "type": "boolean",
+            "description": "append 时是否自动加 HH:mm 时间前缀（默认 true）"
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "maxLength": 128,
+            "description": "可选：防重复提交的幂等请求编号"
+          },
+          "vault": {
+            "type": "string",
+            "description": "可选：已登记的目标知识库 ID 或名称"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "graph_links",
+      "description": "遍历 Obsidian 知识图谱连接：查询单篇笔记的 [[出链]]/![[嵌入]]、反向链接（Backlinks）、未连接提及（Unlinked Mentions）与二跳关联笔记，或查看全库核心枢纽（hubs）、孤立笔记（orphans）与标签聚合（tags）。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "mode": {
+            "type": "string",
+            "enum": [
+              "note",
+              "hubs",
+              "orphans",
+              "tags"
+            ],
+            "description": "note=分析指定笔记的连接网络（默认）；hubs=连接度最高的核心笔记；orphans=无双向链接的孤立笔记；tags=全库标签分布"
+          },
+          "path": {
+            "type": "string",
+            "description": "mode=note 时的精确笔记相对路径"
+          },
+          "title": {
+            "type": "string",
+            "description": "mode=note 时的目标笔记标题（同名时将提示候选路径）"
+          },
+          "limit": {
+            "type": "number",
+            "description": "返回条数上限（1–100，默认 25）"
+          },
+          "refresh": {
+            "type": "boolean",
+            "description": "可选：是否强制刷新索引"
+          },
+          "vault": {
+            "type": "string",
+            "description": "可选：已登记的目标知识库 ID 或名称"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "canvas_ops",
+      "description": "列出、读取、新建或增量合并 Obsidian Canvas 思维白板（.canvas 文件）：支持 text/file/link/group 节点并完整保留已有扩展字段；整板覆盖（overwrite）前需经用户弹窗确认。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "list",
+              "read",
+              "create",
+              "upsert",
+              "overwrite",
+              "write"
+            ],
+            "description": "list=列出所有白板；read=读取完整白板 JSON；create=仅新建（同名报错）；upsert=按 id 无损合并更新节点与边（write 等价于不存在新建、已存在 upsert）；overwrite=整板替换（会弹确认框）"
+          },
+          "path": {
+            "type": "string",
+            "description": "白板相对路径（如 架构梳理.canvas）"
+          },
+          "nodes": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            },
+            "description": "节点数组，支持 {id, type:'text'|'file'|'link'|'group', text?, file?, subpath?, url?, label?, background?, x?, y?, width?, height?, color?}"
+          },
+          "edges": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            },
+            "description": "连线数组，支持 {id?, fromNode, toNode, fromSide?, toSide?, fromEnd?, toEnd?, color?, label?}"
+          },
+          "removeNodeIds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "upsert 模式下要显式移除的节点 id 列表"
+          },
+          "removeEdgeIds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "upsert 模式下要显式移除的连线 id 列表"
+          },
+          "vault": {
+            "type": "string",
+            "description": "可选：已登记的目标知识库 ID 或名称"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "open_in_obsidian",
+      "description": "经路径安全校验后，在桌面端 Obsidian 应用中唤起并定位打开已存在的笔记或白板（优先使用已启用 CLI，否则使用精确路径 obsidian://open?path=... URI）。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "可选：要打开的库内相对路径；省略时打开对应 Vault"
+          },
+          "vault": {
+            "type": "string",
+            "description": "可选：已登记的目标知识库 ID 或名称"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "open_workbench",
+      "description": "在聊天或侧栏打开 Obsidian 知识库交互工作台页面（当用户要求打开可视化面板浏览笔记、预览双链、手动编辑入库或查看今日日记面板时调用）。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "mode": {
+            "type": "string",
+            "enum": [
+              "browse",
+              "capture",
+              "daily"
+            ],
+            "description": "初始打开的页签"
+          },
+          "path": {
+            "type": "string",
+            "description": "可选：初始预览的笔记精确路径"
+          },
+          "title": {
+            "type": "string",
+            "description": "可选：初始预览的笔记标题"
+          },
+          "query": {
+            "type": "string",
+            "description": "可选：初始搜索词"
+          },
+          "vault": {
+            "type": "string",
+            "description": "可选：已登记的目标知识库 ID 或名称"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "complete_notes",
+      "description": "仅供输入框 @ 补全与工作台页面调用：实时返回匹配的 Obsidian 笔记双链候选项（重名笔记自动附带路径消歧）。模型日常检索请调用 search_notes 或 open_workbench。",
+      "approval": "auto",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "trigger": {
+            "type": "string",
+            "enum": [
+              "@",
+              "/"
+            ],
+            "description": "触发字符"
+          },
+          "query": {
+            "type": "string",
+            "description": "用户当前输入的查询词"
+          }
+        },
+        "required": [
+          "trigger",
+          "query"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "pick_vault_dir",
+      "description": "仅供工作台页面调用：弹出系统文件夹选择器登记并切换默认 Obsidian Vault 目录。模型打开界面请调用 open_workbench。",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      }
+    }
+  ],
+  "mcpApps": {
+    "ui": {
+      "resources": [
+        {
+          "uri": "ui://obsidian-vault/workbench",
+          "file": "ui/page.html",
+          "prefersBorder": true
+        }
+      ],
+      "tools": {
+        "open_workbench": {
+          "resourceUri": "ui://obsidian-vault/workbench",
+          "visibility": [
+            "model",
+            "app"
+          ]
+        },
+        "vault_status": {
+          "visibility": [
+            "model",
+            "app"
+          ]
+        },
+        "search_notes": {
+          "visibility": [
+            "model",
+            "app"
+          ]
+        },
+        "read_note": {
+          "visibility": [
+            "model",
+            "app"
+          ]
+        },
+        "write_note": {
+          "visibility": [
+            "model",
+            "app"
+          ]
+        },
+        "daily_note": {
+          "visibility": [
+            "model",
+            "app"
+          ]
+        },
+        "graph_links": {
+          "visibility": [
+            "model",
+            "app"
+          ]
+        },
+        "canvas_ops": {
+          "visibility": [
+            "model",
+            "app"
+          ]
+        },
+        "open_in_obsidian": {
+          "visibility": [
+            "model",
+            "app"
+          ]
+        },
+        "complete_notes": {
+          "visibility": [
+            "app"
+          ]
+        },
+        "pick_vault_dir": {
+          "visibility": [
+            "app"
+          ]
+        }
+      }
+    },
+    "host": {
+      "views": [
+        {
+          "id": "vault-board",
+          "title": "Obsidian 知识库",
+          "resourceUri": "ui://obsidian-vault/workbench",
+          "scope": "global"
+        },
+        {
+          "id": "task-capture",
+          "title": "Obsidian 笔记助手",
+          "resourceUri": "ui://obsidian-vault/workbench",
+          "scope": "task"
+        }
+      ],
+      "contributions": [
+        {
+          "id": "sidebar-nav",
+          "title": "Obsidian 知识库",
+          "position": "sidebar.navigation",
+          "view": "vault-board",
+          "icon": "database"
+        },
+        {
+          "id": "at-note-completion",
+          "title": "引用 Obsidian 笔记",
+          "position": "composer.completion",
+          "tool": "complete_notes",
+          "trigger": "@"
+        },
+        {
+          "id": "composer-quick",
+          "title": "Obsidian",
+          "position": "composer.toolbar",
+          "view": "task-capture",
+          "presentation": "popover"
+        },
+        {
+          "id": "save-ai-message",
+          "title": "保存到 Obsidian 笔记",
+          "position": "message.menu",
+          "view": "task-capture",
+          "match": {
+            "roles": [
+              "assistant"
+            ]
+          },
+          "arguments": {
+            "mode": "capture"
+          }
+        }
+      ],
+      "commands": [
+        {
+          "id": "open-obsidian-board",
+          "title": "打开 Obsidian 知识库工作台",
+          "view": "vault-board"
+        }
+      ],
+      "capabilities": [
+        "context",
+        "draft"
+      ],
+      "settings": [
+        {
+          "id": "default_vault",
+          "title": "默认知识库 (Vault)",
+          "description": "填写已登记的 Vault 名称、ID 或路径；留空自动使用本机最近打开的 Obsidian 知识库。",
+          "type": "string",
+          "default": "",
+          "maxLength": 512
+        },
+        {
+          "id": "inbox_folder",
+          "title": "默认收件箱目录",
+          "description": "消息一键入库或 /obsidian-capture 未指定分类时默认保存的子目录名。",
+          "type": "string",
+          "default": "Inbox",
+          "maxLength": 120
+        },
+        {
+          "id": "daily_folder",
+          "title": "日记目录覆盖",
+          "description": "留空则自动读取当前 Vault 内 .obsidian/daily-notes.json 的日记目录配置。",
+          "type": "string",
+          "default": "",
+          "maxLength": 240
+        },
+        {
+          "id": "insert_style",
+          "title": "输入框 @ 引用格式",
+          "type": "string",
+          "default": "wikilink",
+          "options": [
+            {
+              "label": "[[双链]] + 路径",
+              "value": "wikilink"
+            },
+            {
+              "label": "仅相对路径",
+              "value": "path"
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

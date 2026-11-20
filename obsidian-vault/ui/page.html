@@ -1,0 +1,769 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Obsidian 知识库工作台</title>
+<style>
+:root { color-scheme: light dark; }
+* { box-sizing: border-box; min-width: 0; }
+body {
+  margin: 0;
+  padding: 14px;
+  font: 13px/1.55 var(--font-sans, -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif);
+  color: var(--color-text-primary, CanvasText);
+  background: var(--color-background-primary, Canvas);
+}
+.top-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+.top-actions { display: flex; gap: 6px; align-items: center; }
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  font-size: 14px;
+}
+.vault-select {
+  font-size: 12px;
+  padding: 4px 8px;
+  max-width: 190px;
+}
+.tabs {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+  margin-bottom: 12px;
+}
+button, input, textarea, select {
+  font: inherit;
+  color: inherit;
+  border-radius: 8px;
+  border: 1px solid var(--color-border-primary, rgba(128,128,128,0.3));
+  background: var(--color-background-secondary, rgba(128,128,128,0.08));
+}
+button {
+  padding: 7px 10px;
+  cursor: pointer;
+  font-weight: 500;
+  transition: opacity .15s;
+}
+button:hover:not(:disabled) { opacity: 0.86; }
+button:disabled { opacity: 0.45; cursor: not-allowed; }
+.tab-btn.active {
+  border-color: var(--color-text-primary, CanvasText);
+  font-weight: 600;
+}
+.btn-primary {
+  background: var(--color-text-primary, CanvasText);
+  color: var(--color-background-primary, Canvas);
+  border-color: transparent;
+}
+.search-row {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+.search-row input { flex: 1; padding: 7px 10px; }
+.stats-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+  font-size: 12px;
+  opacity: 0.82;
+}
+.note-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 240px;
+  overflow-y: auto;
+  margin-bottom: 12px;
+}
+.note-item {
+  text-align: left;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.note-item.selected {
+  border-color: var(--color-text-primary, CanvasText);
+}
+.note-item-title { font-weight: 600; font-size: 13px; overflow-wrap: anywhere; }
+.note-item-meta { font-size: 11px; opacity: 0.72; overflow-wrap: anywhere; }
+.links-meta { margin-bottom: 6px; }
+.card {
+  border: 1px solid var(--color-border-primary, rgba(128,128,128,0.25));
+  border-radius: 10px;
+  padding: 12px;
+  background: var(--color-background-secondary, rgba(128,128,128,0.05));
+  margin-bottom: 10px;
+}
+.preview-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+.preview-title { font-size: 15px; font-weight: 600; margin: 0; overflow-wrap: anywhere; }
+.tag-list { display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: 8px; }
+.tag {
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 6px;
+  border: 1px solid var(--color-border-primary, rgba(128,128,128,0.25));
+}
+.preview-body {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 280px;
+  overflow-y: auto;
+  font-size: 12.5px;
+  line-height: 1.6;
+  padding-top: 6px;
+  border-top: 1px solid var(--color-border-primary, rgba(128,128,128,0.18));
+}
+.daily-preview { margin-bottom: 10px; }
+.daily-textarea { min-height: 72px; }
+.action-bar { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 10px; }
+label.field { display: block; margin-bottom: 8px; font-size: 12px; font-weight: 500; }
+label.field input, label.field textarea, label.field select {
+  display: block;
+  width: 100%;
+  margin-top: 4px;
+  padding: 7px 9px;
+}
+textarea { min-height: 120px; resize: vertical; line-height: 1.5; }
+#status {
+  font-size: 12px;
+  opacity: 0.85;
+  margin: 6px 0 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.hidden { display: none !important; }
+</style>
+</head>
+<body>
+<div class="top-bar">
+  <div class="brand">
+    <span id="brand-label">Obsidian 知识库</span>
+    <select id="vault-select" class="vault-select" aria-label="选择知识库"></select>
+  </div>
+  <div class="top-actions">
+    <button id="btn-pick-vault" type="button">添加库</button>
+    <button id="btn-refresh" type="button">刷新</button>
+  </div>
+</div>
+
+<div class="tabs">
+  <button class="tab-btn active" data-tab="browse" type="button">浏览与双链</button>
+  <button class="tab-btn" data-tab="capture" type="button">保存为笔记</button>
+  <button class="tab-btn" data-tab="daily" type="button">今日日记</button>
+</div>
+
+<section id="panel-browse">
+  <form id="search-form" class="search-row">
+    <input id="search-input" placeholder="搜索标题、正文、#标签…" maxlength="200">
+    <button type="submit">搜索</button>
+  </form>
+  <div id="vault-stats" class="stats-row"></div>
+  <div id="note-list" class="note-list"></div>
+  <div id="note-preview" class="card hidden">
+    <div class="preview-header">
+      <div>
+        <h2 id="prev-title" class="preview-title"></h2>
+        <div id="prev-path" class="note-item-meta"></div>
+      </div>
+    </div>
+    <div id="prev-tags" class="tag-list"></div>
+    <div id="prev-links" class="note-item-meta links-meta"></div>
+    <div id="prev-body" class="preview-body"></div>
+    <div class="action-bar">
+      <button id="btn-insert-draft" type="button">插入输入框引用</button>
+      <button id="btn-open-obs" type="button">在 Obsidian 打开</button>
+    </div>
+  </div>
+</section>
+
+<section id="panel-capture" class="hidden">
+  <form id="capture-form" class="card">
+    <label class="field">目标路径（相对于当前知识库根目录）
+      <input id="cap-path" required placeholder="Inbox/未命名笔记.md" maxlength="240">
+    </label>
+    <label class="field">写入方式
+      <select id="cap-mode">
+        <option value="create">新建笔记 (create)</option>
+        <option value="append">追加到末尾 (append)</option>
+        <option value="append-heading">追加到指定章节 (append-heading)</option>
+      </select>
+    </label>
+    <label id="cap-heading-wrap" class="field hidden">章节标题
+      <input id="cap-heading" placeholder="例如：核心结论" maxlength="120">
+    </label>
+    <label class="field">标签（逗号分隔，自动写入 YAML Frontmatter）
+      <input id="cap-tags" placeholder="AI整理, Cindy" maxlength="200">
+    </label>
+    <label class="field">Markdown 内容（支持 [[双链]]）
+      <textarea id="cap-content" required maxlength="100000" placeholder="在此粘贴或编辑要沉淀到 Obsidian 的内容…"></textarea>
+    </label>
+    <div class="action-bar">
+      <button id="btn-fill-context" type="button">填入当前消息/选中文本</button>
+      <button id="btn-save-note" class="btn-primary" type="submit">保存到知识库</button>
+    </div>
+  </form>
+</section>
+
+<section id="panel-daily" class="hidden">
+  <div class="card">
+    <div class="preview-header">
+      <h2 id="daily-title" class="preview-title">今日日记</h2>
+      <button id="btn-load-daily" type="button">刷新今日</button>
+    </div>
+    <div id="daily-body" class="preview-body daily-preview">正在读取今日日记…</div>
+    <form id="daily-form">
+      <label class="field">快速记录 / 待办
+        <textarea id="daily-input" class="daily-textarea" rows="3" placeholder="记一条灵感、会议纪要或待办事项…" required></textarea>
+      </label>
+      <div class="action-bar">
+        <button id="btn-daily-append" class="btn-primary" type="submit">追加记录</button>
+        <button id="btn-daily-task" type="button">添加为待办 (- [ ])</button>
+      </div>
+    </form>
+  </div>
+</section>
+
+<p id="status" role="status">正在连接 Obsidian 知识库…</p>
+<script type="module">
+import { App } from '@modelcontextprotocol/ext-apps';
+
+const app = new App({ name: 'Obsidian 知识库工作台', version: '1.0.1' }, {}, { autoResize: true });
+const $ = (sel) => document.querySelector(sel);
+const statusEl = $('#status');
+const controller = new AbortController();
+
+const SAFE_CSS_VAR_RE = /^--(?:color|font|border|radius|shadow|spacing|surface|text|bg)-[a-z0-9-]+$/i;
+let appliedThemeVars = new Set();
+
+let activeVaultId = '';
+let activeInboxFolder = 'Inbox';
+let currentNote = null;
+let activeTab = 'browse';
+let bootstrappedFromToolResult = false;
+let lastPrefilledSignature = '';
+
+let statusSeq = 0;
+let searchSeq = 0;
+let previewSeq = 0;
+let dailySeq = 0;
+let dailySubmitting = false;
+let pendingCaptureIdem = null;
+let pendingDailyIdem = null;
+
+function getLocalIsoDate() {
+  const d = new Date();
+  const yyyy = String(d.getFullYear());
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  return yyyy + '-' + mm + '-' + dd;
+}
+
+function setStatus(text) {
+  statusEl.textContent = text || '';
+}
+
+function applyTheme(ctx) {
+  if (!ctx) return;
+  if (ctx.theme === 'light' || ctx.theme === 'dark') {
+    document.documentElement.style.colorScheme = ctx.theme;
+  }
+  const nextVars = new Set();
+  for (const [k, v] of Object.entries(ctx.styles?.variables ?? {})) {
+    if (SAFE_CSS_VAR_RE.test(k) && typeof v === 'string' && v.length <= 200 && !/[;{}]/.test(v)) {
+      document.documentElement.style.setProperty(k, v);
+      nextVars.add(k);
+    }
+  }
+  for (const oldKey of appliedThemeVars) {
+    if (!nextVars.has(oldKey)) document.documentElement.style.removeProperty(oldKey);
+  }
+  appliedThemeVars = nextVars;
+}
+
+function switchTab(tab, triggerLoad = true) {
+  const prev = activeTab;
+  activeTab = tab;
+  for (const btn of document.querySelectorAll('.tab-btn')) {
+    btn.classList.toggle('active', btn.dataset.tab === tab);
+  }
+  $('#panel-browse').classList.toggle('hidden', tab !== 'browse');
+  $('#panel-capture').classList.toggle('hidden', tab !== 'capture');
+  $('#panel-daily').classList.toggle('hidden', tab !== 'daily');
+  if (tab === 'daily' && triggerLoad && prev !== 'daily') {
+    void loadDaily();
+  }
+}
+
+function extractMessageText(msg) {
+  if (!msg) return '';
+  if (typeof msg.text === 'string' && msg.text.trim()) return msg.text.trim();
+  if (typeof msg.markdown === 'string' && msg.markdown.trim()) return msg.markdown.trim();
+  if (typeof msg.content === 'string' && msg.content.trim()) return msg.content.trim();
+  if (Array.isArray(msg.content)) {
+    const joined = msg.content.map((b) => (typeof b === 'string' ? b : b?.text || '')).filter(Boolean).join('\n\n');
+    if (joined.trim()) return joined.trim();
+  }
+  return '';
+}
+
+function extractHostProjectedText(ctx, preferMessage = false) {
+  const cindy = ctx?.cindy;
+  if (!cindy) return { text: '', suggestedTitle: '', sig: '' };
+  const msgText = extractMessageText(cindy.context?.message);
+  const selText = (cindy.selection?.text || cindy.draft?.selection?.text || '').trim();
+  const taskTitle = cindy.context?.task?.title || '';
+
+  if (preferMessage && msgText) {
+    return { text: msgText, suggestedTitle: taskTitle, sig: 'msg:' + msgText.slice(0, 120) };
+  }
+  if (selText) {
+    return { text: selText, suggestedTitle: taskTitle, sig: 'sel:' + selText.slice(0, 120) };
+  }
+  if (msgText) {
+    return { text: msgText, suggestedTitle: taskTitle, sig: 'msg:' + msgText.slice(0, 120) };
+  }
+  return { text: '', suggestedTitle: taskTitle, sig: '' };
+}
+
+function sanitizeFilename(name) {
+  return String(name || '').replace(/[\\/:*?"<>|]/g, '-').replace(/\s+/g, ' ').trim().slice(0, 80);
+}
+
+function fillFromHostContext(silent = false, preferMessage = false) {
+  const ctx = app.getHostContext() ?? {};
+  const { text, suggestedTitle, sig } = extractHostProjectedText(ctx, preferMessage);
+  const today = getLocalIsoDate();
+  const folder = activeInboxFolder || 'Inbox';
+  if (text) {
+    if (!silent || !$('#cap-content').value.trim()) {
+      $('#cap-content').value = text;
+      lastPrefilledSignature = sig;
+    }
+    if (!$('#cap-path').value.trim()) {
+      const stem = sanitizeFilename(suggestedTitle) || ('对话摘录-' + today);
+      $('#cap-path').value = folder + '/' + stem + '.md';
+    }
+    if (!silent) setStatus('已填入当前消息或选中文本。');
+    return true;
+  }
+  if (!silent) {
+    if (!$('#cap-path').value.trim()) $('#cap-path').value = folder + '/笔记-' + today + '.md';
+    setStatus('当前没有检测到选区或消息正文，可直接输入要保存的内容。');
+  }
+  return false;
+}
+
+function syncHostContext() {
+  const ctx = app.getHostContext() ?? {};
+  applyTheme(ctx);
+  const cindy = ctx.cindy ?? {};
+  const canDraft = Boolean(cindy.source?.sessionId && (cindy.capabilities || []).includes('draft'));
+  $('#btn-insert-draft').disabled = !canDraft || !currentNote;
+
+  const input = cindy.input || {};
+  if (input.mode === 'capture') {
+    if (activeTab !== 'capture') switchTab('capture', false);
+    const proj = extractHostProjectedText(ctx, true);
+    if (proj.text && proj.sig !== lastPrefilledSignature && !$('#cap-content').value.trim()) {
+      fillFromHostContext(true, true);
+    }
+  }
+}
+
+async function callTool(name, args = {}) {
+  const withVault = activeVaultId && args.vault === undefined ? { ...args, vault: activeVaultId } : args;
+  const res = await app.callServerTool(
+    { name, arguments: withVault },
+    { timeout: 30 * 60 * 1000, maxTotalTimeout: 30 * 60 * 1000, signal: controller.signal }
+  );
+  if (res.isError) {
+    const msg = res.content?.find((x) => x.type === 'text')?.text || '操作未完成';
+    throw new Error(msg);
+  }
+  return res.structuredContent ?? res;
+}
+
+function renderVaultSelector(vaults, activeVault) {
+  const sel = $('#vault-select');
+  sel.replaceChildren();
+  const list = Array.isArray(vaults) ? vaults.filter((v) => v.exists) : [];
+  if (list.length === 0) {
+    const opt = document.createElement('option');
+    opt.value = '';
+    opt.textContent = '未检测到知识库';
+    sel.append(opt);
+    activeVaultId = '';
+    return;
+  }
+  for (const v of list) {
+    const opt = document.createElement('option');
+    opt.value = v.id;
+    opt.textContent = v.name;
+    sel.append(opt);
+  }
+  activeVaultId = (activeVault && activeVault.id) || list[0].id;
+  sel.value = activeVaultId;
+}
+
+function renderNoteList(items) {
+  const listEl = $('#note-list');
+  listEl.replaceChildren();
+  if (!items || items.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'note-item-meta';
+    empty.textContent = '暂无匹配的笔记。';
+    listEl.append(empty);
+    return;
+  }
+  for (const item of items) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'note-item' + (currentNote && currentNote.path === item.path ? ' selected' : '');
+    const t = document.createElement('div');
+    t.className = 'note-item-title';
+    t.textContent = item.title || item.path;
+    const m = document.createElement('div');
+    m.className = 'note-item-meta';
+    const tagStr = item.tags && item.tags.length ? ' · #' + item.tags.slice(0, 3).join(' #') : '';
+    const blStr = typeof item.backlinkCount === 'number' ? ' · 反向链接 ' + item.backlinkCount : '';
+    m.textContent = item.path + tagStr + blStr;
+    btn.append(t, m);
+    btn.onclick = () => void openNotePreview(item.path);
+    listEl.append(btn);
+  }
+}
+
+function renderPreview(note) {
+  currentNote = note;
+  const box = $('#note-preview');
+  if (!note) {
+    box.classList.add('hidden');
+    syncHostContext();
+    return;
+  }
+  box.classList.remove('hidden');
+  $('#prev-title').textContent = note.title || note.path;
+  $('#prev-path').textContent = note.path;
+  const tagsEl = $('#prev-tags');
+  tagsEl.replaceChildren();
+  for (const tag of note.tags || []) {
+    const span = document.createElement('span');
+    span.className = 'tag';
+    span.textContent = '#' + tag;
+    tagsEl.append(span);
+  }
+  const outCount = Array.isArray(note.outlinks) ? note.outlinks.length : 0;
+  const backCount = Array.isArray(note.backlinks) ? note.backlinks.length : 0;
+  const backNames = (note.backlinks || []).slice(0, 4).map((b) => '[[' + b.title + ']]').join(' ');
+  $('#prev-links').textContent = '出链 ' + outCount + ' · 反向链接 ' + backCount + (backNames ? ' (' + backNames + ')' : '');
+  $('#prev-body').textContent = note.content || '（空白笔记）';
+  syncHostContext();
+}
+
+function applyStatusPayload(data) {
+  renderVaultSelector(data.vaults, data.activeVault);
+  if (data.summary) {
+    const s = data.summary;
+    activeInboxFolder = s.inboxFolder || 'Inbox';
+    $('#vault-stats').textContent = '笔记 ' + s.noteCount + ' 篇 · 双链 ' + s.totalWikilinks + ' 条 · 未完待办 ' + s.openTaskCount + ' 项' + (data.obsidianCli?.running ? ' · Obsidian 已连接' : ' · 本地直连');
+    renderNoteList(s.recentNotes || []);
+  } else {
+    $('#vault-stats').textContent = data.activeVaultError || '未检测到知识库，请点击右上角「添加库」选择 Obsidian 文件夹。';
+    renderNoteList([]);
+  }
+}
+
+async function openNotePreview(notePath) {
+  const seq = ++previewSeq;
+  const reqVault = activeVaultId;
+  try {
+    setStatus('正在读取 ' + notePath + ' …');
+    const data = await callTool('read_note', { vault: reqVault || undefined, path: notePath, maxChars: 25000 });
+    if (seq !== previewSeq || (reqVault && activeVaultId !== reqVault)) return;
+    renderPreview(data);
+    setStatus('已加载笔记：' + data.path);
+  } catch (err) {
+    if (seq !== previewSeq) return;
+    setStatus(err.message);
+  }
+}
+
+async function refreshStatus(explicitVaultId) {
+  const seq = ++statusSeq;
+  const targetVault = explicitVaultId !== undefined ? explicitVaultId : activeVaultId;
+  try {
+    setStatus('正在扫描知识库…');
+    const data = await callTool('vault_status', { ...(targetVault ? { vault: targetVault } : {}), refresh: true });
+    if (seq !== statusSeq) return;
+    applyStatusPayload(data);
+    if (!currentNote && data.summary?.recentNotes?.length > 0) {
+      await openNotePreview(data.summary.recentNotes[0].path);
+    } else if (!data.summary) {
+      renderPreview(null);
+    } else {
+      setStatus('知识库就绪。');
+    }
+  } catch (err) {
+    if (seq !== statusSeq) return;
+    setStatus(err.message);
+  }
+}
+
+async function loadDaily() {
+  const seq = ++dailySeq;
+  const reqVault = activeVaultId;
+  try {
+    const data = await callTool('daily_note', { vault: reqVault || undefined, action: 'read' });
+    if (seq !== dailySeq || (reqVault && activeVaultId !== reqVault)) return;
+    $('#daily-title').textContent = '今日日记 (' + (data.date || getLocalIsoDate()) + ')';
+    $('#daily-body').textContent = data.exists ? (data.content || '（今日日记为空）') : '今日日记尚未创建，在下方提交内容将自动按模板初始化。';
+  } catch (err) {
+    if (seq !== dailySeq) return;
+    $('#daily-body').textContent = err.message;
+  }
+}
+
+$('#vault-select').onchange = () => {
+  const nextId = $('#vault-select').value;
+  if (nextId === activeVaultId) return;
+  activeVaultId = nextId;
+  currentNote = null;
+  previewSeq++;
+  searchSeq++;
+  dailySeq++;
+  renderPreview(null);
+  void refreshStatus(nextId);
+  if (activeTab === 'daily') void loadDaily();
+};
+
+for (const btn of document.querySelectorAll('.tab-btn')) {
+  btn.onclick = () => switchTab(btn.dataset.tab, true);
+}
+
+$('#cap-mode').onchange = () => {
+  $('#cap-heading-wrap').classList.toggle('hidden', $('#cap-mode').value !== 'append-heading');
+};
+
+$('#btn-refresh').onclick = () => void refreshStatus(activeVaultId);
+
+$('#btn-pick-vault').onclick = async () => {
+  try {
+    setStatus('请在系统弹窗中选择 Obsidian Vault 目录…');
+    const data = await callTool('pick_vault_dir', {});
+    currentNote = null;
+    renderPreview(null);
+    if (data && data.activeVault) {
+      applyStatusPayload(data);
+      setStatus('已切换至知识库：' + data.activeVault.name);
+    } else {
+      await refreshStatus('');
+    }
+  } catch (err) {
+    setStatus(err.message);
+  }
+};
+
+$('#search-form').onsubmit = async (ev) => {
+  ev.preventDefault();
+  const q = $('#search-input').value.trim();
+  if (!q) {
+    await refreshStatus(activeVaultId);
+    return;
+  }
+  const seq = ++searchSeq;
+  const reqVault = activeVaultId;
+  try {
+    setStatus('正在搜索 "' + q + '" …');
+    const res = await callTool('search_notes', { vault: reqVault || undefined, query: q, limit: 20 });
+    if (seq !== searchSeq || (reqVault && activeVaultId !== reqVault)) return;
+    renderNoteList(res.results || []);
+    setStatus('找到 ' + (res.totalMatches || 0) + ' 篇相关笔记。');
+  } catch (err) {
+    if (seq !== searchSeq) return;
+    setStatus(err.message);
+  }
+};
+
+$('#btn-insert-draft').onclick = async () => {
+  if (!currentNote) return;
+  try {
+    const linkPart = currentNote.path.includes('/') ? (currentNote.path.replace(/\.md$/i, '') + '|' + currentNote.title) : currentNote.title;
+    const text = '[[' + linkPart + ']] (Obsidian: ' + currentNote.path + ') ';
+    const r = await app.callServerTool(
+      { name: 'cindy.ui.draft', arguments: { mode: 'append', text } },
+      { timeout: 15000, maxTotalTimeout: 15000, signal: controller.signal }
+    );
+    if (r.isError) throw new Error('插入草稿失败');
+    setStatus('已将 [[' + currentNote.title + ']] 引用插入输入框。');
+  } catch (err) {
+    setStatus(err.message);
+  }
+};
+
+$('#btn-open-obs').onclick = async () => {
+  if (!currentNote) return;
+  try {
+    await callTool('open_in_obsidian', { vault: activeVaultId || undefined, path: currentNote.path });
+    setStatus('已请求桌面端 Obsidian 打开：' + currentNote.path);
+  } catch (err) {
+    setStatus(err.message);
+  }
+};
+
+$('#btn-fill-context').onclick = () => fillFromHostContext(false, false);
+
+$('#capture-form').onsubmit = async (ev) => {
+  ev.preventDefault();
+  const saveBtn = $('#btn-save-note');
+  if (saveBtn.disabled) return;
+  const pathVal = $('#cap-path').value.trim();
+  const modeVal = $('#cap-mode').value;
+  const headingVal = $('#cap-heading').value.trim();
+  const tagsVal = $('#cap-tags').value.split(/[,，]/).map((s) => s.trim()).filter(Boolean);
+  const contentVal = $('#cap-content').value;
+  if (!pathVal || !contentVal.trim()) return;
+
+  const snapSig = JSON.stringify([activeVaultId, pathVal, modeVal, headingVal, tagsVal, contentVal]);
+  if (!pendingCaptureIdem || pendingCaptureIdem.sig !== snapSig) {
+    pendingCaptureIdem = { sig: snapSig, key: crypto.randomUUID() };
+  }
+
+  saveBtn.disabled = true;
+  setStatus('正在写入知识库…');
+  try {
+    const res = await callTool('write_note', {
+      vault: activeVaultId || undefined,
+      path: pathVal,
+      mode: modeVal,
+      ...(modeVal === 'append-heading' ? { heading: headingVal } : {}),
+      ...(tagsVal.length ? { tags: tagsVal } : {}),
+      content: contentVal,
+      idempotencyKey: pendingCaptureIdem.key,
+    });
+    pendingCaptureIdem = null;
+    setStatus('已保存至 ' + res.path);
+    switchTab('browse', false);
+    await openNotePreview(res.path);
+  } catch (err) {
+    setStatus(err.message);
+  } finally {
+    saveBtn.disabled = false;
+  }
+};
+
+$('#btn-load-daily').onclick = () => void loadDaily();
+
+async function submitDaily(action) {
+  if (dailySubmitting) return;
+  const input = $('#daily-input');
+  const snapshot = input.value;
+  const text = snapshot.trim();
+  if (!text) return;
+
+  const snapSig = JSON.stringify([activeVaultId, action, text]);
+  if (!pendingDailyIdem || pendingDailyIdem.sig !== snapSig) {
+    pendingDailyIdem = { sig: snapSig, key: crypto.randomUUID() };
+  }
+
+  dailySubmitting = true;
+  $('#btn-daily-append').disabled = true;
+  $('#btn-daily-task').disabled = true;
+  setStatus('正在写入今日日记…');
+  try {
+    const data = await callTool('daily_note', {
+      vault: activeVaultId || undefined,
+      action,
+      content: text,
+      idempotencyKey: pendingDailyIdem.key,
+    });
+    pendingDailyIdem = null;
+    if (input.value === snapshot) input.value = '';
+    $('#daily-title').textContent = '今日日记 (' + (data.date || getLocalIsoDate()) + ')';
+    if (data.content !== undefined) $('#daily-body').textContent = data.content || '';
+    setStatus(data.previewWarning || ('已更新今日日记：' + data.path));
+  } catch (err) {
+    setStatus(err.message);
+  } finally {
+    dailySubmitting = false;
+    $('#btn-daily-append').disabled = false;
+    $('#btn-daily-task').disabled = false;
+  }
+}
+
+$('#daily-form').onsubmit = (ev) => {
+  ev.preventDefault();
+  void submitDaily('append');
+};
+$('#btn-daily-task').onclick = () => void submitDaily('add-task');
+
+app.ontoolresult = (result) => {
+  const sc = result?.structuredContent;
+  if (!sc) return;
+  bootstrappedFromToolResult = true;
+  statusSeq++; // supersede any initial auto scan!
+  if (sc.status) {
+    applyStatusPayload(sc.status);
+  }
+  if (sc.query) {
+    $('#search-input').value = sc.query;
+  }
+  if (sc.searchResults?.results) {
+    renderNoteList(sc.searchResults.results);
+  }
+  if (sc.initialNote) {
+    renderPreview(sc.initialNote);
+    setStatus('已加载笔记：' + sc.initialNote.path);
+  } else if (sc.initialNoteError) {
+    setStatus(sc.initialNoteError);
+  } else {
+    setStatus('知识库就绪。');
+  }
+  if (sc.mode === 'capture') switchTab('capture', false);
+  else if (sc.mode === 'daily') {
+    switchTab('daily', false);
+    void loadDaily();
+  }
+};
+
+app.onhostcontextchanged = syncHostContext;
+app.onteardown = async () => { controller.abort(); return {}; };
+
+try {
+  await app.connect();
+  syncHostContext();
+  const hostInput = app.getHostContext()?.cindy?.input;
+  if (!bootstrappedFromToolResult) {
+    if (hostInput?.mode === 'daily') switchTab('daily', false);
+    await refreshStatus(hostInput?.vault || '');
+    if (hostInput?.query) {
+      $('#search-input').value = hostInput.query;
+      $('#search-form').requestSubmit();
+    }
+    if (activeTab === 'daily') await loadDaily();
+  }
+} catch {
+  setStatus('无法连接到 Cindy 宿主，请确认客户端版本支持交互页面。');
+}
+</script>
+</body>
+</html>

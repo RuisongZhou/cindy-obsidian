@@ -1,0 +1,5 @@
+{
+  "name": "Obsidian 知识库",
+  "description": "深度连接本机 Obsidian 知识库：支持 @ 实时搜笔记、双链图谱遍历、按章节非破坏性编辑、日记沉淀与消息一键入库。",
+  "whenToUse": "用户想查询、搜索、阅读、整理、创建或修改 Obsidian 笔记与知识库（Vault）、每日日记（Daily Note）、双链与反向链接、标签属性、Canvas 思维白板，或将对话结论存入第二大脑时找我"
+}
