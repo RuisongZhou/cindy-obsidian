@@ -1,8 +1,15 @@
 // Obsidian 知识库插件后台电子脑 (main.js)
 let cachedSettings = null;
 let cachedSettingsAt = 0;
+let writeQueue = Promise.resolve();
+let settingsChannel;
+try {
+  settingsChannel = new BroadcastChannel('obsidian-vault');
+} catch {
+  // Settings still refresh using the cache expiry.
+}
 
-async function getSettings(force = false) {
+async function getSettings(force = false, mustRead = false) {
   const now = Date.now();
   if (!force && cachedSettings && now - cachedSettingsAt < 2000) {
     return cachedSettings;
@@ -11,13 +18,16 @@ async function getSettings(force = false) {
     const res = await fetch('/kv');
     if (res.ok) {
       const json = await res.json();
-      cachedSettings = json && typeof json === 'object' && !Array.isArray(json) ? json : {};
-      cachedSettingsAt = now;
-      return cachedSettings;
+      if (json && typeof json === 'object' && !Array.isArray(json)) {
+        cachedSettings = json;
+        cachedSettingsAt = now;
+        return cachedSettings;
+      }
     }
   } catch {
     // ignore
   }
+  if (mustRead) throw new Error('无法读取最新写入规则，本次修改已取消。');
   return cachedSettings || {};
 }
 
@@ -28,7 +38,8 @@ async function patchSettings(patchObj) {
   }
   const current = (await resGet.json()) || {};
   const next = { ...current };
-  for (const [k, v] of Object.entries(patchObj || {})) {
+  const patch = typeof patchObj === 'function' ? patchObj(current) : patchObj;
+  for (const [k, v] of Object.entries(patch || {})) {
     if (v === undefined) delete next[k];
     else next[k] = v;
   }
@@ -39,30 +50,45 @@ async function patchSettings(patchObj) {
   cachedSettings = next;
   cachedSettingsAt = Date.now();
   try {
-    new BroadcastChannel('obsidian-vault').postMessage({ type: 'settings-changed', settings: next });
-  } catch {}
+    settingsChannel?.postMessage({ type: 'settings-changed' });
+  } catch {
+    // The settings are already saved.
+  }
   return next;
 }
 
-try {
-  const bc = new BroadcastChannel('obsidian-vault');
-  bc.onmessage = (ev) => {
+if (settingsChannel) {
+  settingsChannel.onmessage = (ev) => {
     if (ev.data && ev.data.type === 'settings-changed') {
       cachedSettings = null;
       cachedSettingsAt = 0;
     }
   };
-} catch {}
+}
+
+function serializeWrite(operation) {
+  const result = writeQueue.then(operation);
+  writeQueue = result.catch(() => {});
+  return result;
+}
 
 async function callWorker(method, params, callId, timeoutMs = 45000) {
-  const settings = await getSettings();
-  const mergedParams = { ...(params || {}), settings };
-  return await cindy.node.request({
-    method,
-    params: mergedParams,
-    ...(callId ? { callId } : {}),
-    timeoutMs,
-  });
+  const action = params?.action;
+  const mutates = method === 'write_note' || (method === 'replace_in_note' && !params?.dryRun) ||
+    (method === 'manage_tags' && params?.operation !== 'list') ||
+    (method === 'daily_note' && Boolean(action) && action !== 'read') ||
+    (method === 'canvas_ops' && Boolean(action) && action !== 'read' && action !== 'list');
+  const run = async () => {
+    const strict = mutates || method === 'inspect_write_target' || method === 'inspect_vault_write_policy';
+    const settings = await getSettings(strict, strict);
+    return cindy.node.request({
+      method,
+      params: { ...(params || {}), settings },
+      ...(callId ? { callId } : {}),
+      timeoutMs,
+    });
+  };
+  return mutates || method === 'write_receipt' ? serializeWrite(run) : run();
 }
 
 function extractWorkerError(res, fallbackMsg) {
@@ -81,9 +107,20 @@ function summarizeResult(tool, data) {
       return '当前知识库：' + v.name + ' (' + v.path + ')，共 ' + (s ? s.noteCount : 0) + ' 篇笔记、' + (s ? s.totalWikilinks : 0) + ' 条双链、' + (s ? s.openTaskCount : 0) + ' 项未完待办。';
     }
     case 'search_notes': {
-      const list = (data.results || []).map((r, i) => (i + 1) + '. ' + r.path + (r.tags && r.tags.length ? ' [#' + r.tags.join(' #') + ']' : '') + '\n   ' + (r.snippet || '')).join('\n');
-      return '在知识库「' + (data.vault?.name || '') + '」中找到 ' + (data.totalMatches || 0) + ' 篇匹配笔记' + (list ? '：\n' + list : '。');
+      const list = (data.results || []).map((r, i) => {
+        const match = r.matches?.[0];
+        const position = match ? '（正文第 ' + match.line + ' 行，第 ' + match.column + ' 列）' : '';
+        const tags = r.tags?.length ? ' [#' + r.tags.join(' #') + ']' : '';
+        return (i + 1 + (data.offset || 0)) + '. ' + r.path + position + tags + '\n   ' + (r.snippet || '');
+      }).join('\n');
+      return '在知识库「' + (data.vault?.name || '') + '」中找到 ' + (data.totalMatches || 0) + ' 篇匹配笔记' + (list ? '：\n' + list : '。') + (data.nextCursor ? '\n还有结果，可使用 nextCursor 获取下一页。' : '');
     }
+    case 'list_notes':
+      return '目录「' + (data.folder || '/') + '」返回 ' + data.entries.length + ' 项' + (data.truncated ? '，结果不完整。' : '。');
+    case 'replace_in_note':
+      return data.path + '：' + (data.action === 'preview' ? '预览找到 ' : '已处理 ') + data.matchCount + ' 处匹配。';
+    case 'manage_tags':
+      return data.path + ' 的 Frontmatter 标签：' + (data.tags.join(', ') || '无') + '。实际修改 ' + data.applied.length + ' 项。';
     case 'read_note': {
       const header = '笔记：' + data.path + '（知识库：' + (data.vault?.name || '') + '，反向链接 ' + (data.backlinks?.length || 0) + '，出链 ' + (data.outlinks?.length || 0) + '）';
       return header + '\n\n' + (data.content || '');
@@ -104,7 +141,7 @@ function summarizeResult(tool, data) {
       return '已保存白板 ' + data.path + '（' + data.action + '，节点 ' + data.nodeCount + ' 个，连线 ' + data.edgeCount + ' 条）。';
     }
     case 'open_in_obsidian':
-      return '已向桌面端 Obsidian 发送打开请求：' + (data.path || data.vault?.name || '');
+      return '已向执行电脑上的 Obsidian 发送打开请求：' + (data.path || data.vault?.name || '');
     default:
       return '操作已完成。';
   }
@@ -122,7 +159,7 @@ function sendSuccess(callId, summaryText, data) {
   });
 }
 
-function sendToolError(callId, message, errorCode = 'OBSIDIAN_ERROR') {
+function sendToolError(callId, message, errorCode = 'OBSIDIAN_ERROR', writeNotCommitted = false) {
   return cindy.send({
     type: 'tool-result',
     callId,
@@ -130,7 +167,7 @@ function sendToolError(callId, message, errorCode = 'OBSIDIAN_ERROR') {
     result: {
       isError: true,
       content: [{ type: 'text', text: '[' + errorCode + '] ' + String(message || '操作未完成，请检查参数后重试。') }],
-      structuredContent: { ok: false, errorCode, message: String(message || '操作未完成') },
+      structuredContent: { ok: false, errorCode, message: String(message || '操作未完成'), ...(writeNotCommitted ? { writeNotCommitted } : {}) },
     },
   });
 }
@@ -161,11 +198,11 @@ cindy.onHostMessage(async function (msg) {
         title: '选择 Obsidian 知识库 (Vault) 根目录',
         callId,
       });
-      if (!picked || !picked.ok) {
-        const code = (picked && picked.errorCode) || 'PICK_CANCELLED';
+      if (!picked?.ok || typeof picked.path !== 'string' || !picked.path) {
+        const code = picked?.errorCode || 'PICK_FAILED';
         const msgText = code === 'CANCELLED'
           ? '已取消目录选择。'
-          : '无法打开系统目录选择器，请在运行 Cindy 的电脑上操作。';
+          : '无法打开系统目录选择器，请到运行本插件的电脑上添加知识库。';
         await sendToolError(callId, msgText, code);
         return;
       }
@@ -176,15 +213,47 @@ cindy.onHostMessage(async function (msg) {
       if (picked.path && !prevList.some((v) => (typeof v === 'string' ? v : v && v.path) === picked.path)) {
         prevList.push({ name: picked.name || 'Vault', path: picked.path });
       }
-      await patchSettings({
+      await serializeWrite(() => patchSettings({
         default_vault: picked.path || latest.default_vault || '',
         custom_vaults: prevList,
         defaultVault: undefined,
         customVaults: undefined,
-      });
+      }));
       const statusRes = await callWorker('vault_status', { vault: picked.path, refresh: true }, callId);
       const data = statusRes.ok ? statusRes.result : { picked, scanWarning: statusRes.message };
       await sendSuccess(callId, '已添加并切换默认知识库为：' + (picked.name || picked.path), data);
+      return;
+    }
+
+    if (tool === 'set_vault_write_policy') {
+      if (typeof args.restrictFolders !== 'boolean' || !Array.isArray(args.folders)) {
+        await sendToolError(callId, '请选择有效的写入范围。', 'INVALID_WRITE_POLICY');
+        return;
+      }
+      const checked = await callWorker('inspect_vault_write_policy', {
+        vault: args.vault,
+        policy: { readOnly: args.readOnly, writeFolders: args.restrictFolders ? args.folders : null },
+      }, callId);
+      if (!checked.ok) {
+        const error = extractWorkerError(checked);
+        await sendToolError(callId, error.msg, error.code);
+        return;
+      }
+      const { vault, policy } = checked.result;
+      const scope = policy.readOnly ? '只读' : policy.writeFolders === null ? '允许写入全库' :
+        policy.writeFolders.length ? '仅允许写入 ' + policy.writeFolders.length + ' 个指定目录' : '不允许写入任何目录';
+      const confirmation = await cindy.confirm({
+        body: '更新执行电脑上知识库「' + vault.name + '」的插件写入规则：' + scope + '？',
+        confirmText: '保存规则',
+      });
+      if (!confirmation?.ok || !confirmation.confirmed) {
+        await sendToolError(callId, '写入规则未更改。', 'CONFIRMATION_DECLINED');
+        return;
+      }
+      await serializeWrite(() => patchSettings((settings) => ({
+        vault_write_policies: { ...settings.vault_write_policies, [vault.path]: policy },
+      })));
+      await sendSuccess(callId, '已保存知识库写入规则。', { vault, policy });
       return;
     }
 
@@ -209,7 +278,7 @@ cindy.onHostMessage(async function (msg) {
         if (sRes.ok) searchResults = sRes.result;
       }
       const payload = {
-        mode: args.mode || (initialNote ? 'browse' : 'browse'),
+        mode: args.mode || 'browse',
         query: args.query || '',
         status: statusRes.result,
         initialNote,
@@ -265,7 +334,7 @@ cindy.onHostMessage(async function (msg) {
       );
       if (!res.ok) {
         const { code, msg: errText } = extractWorkerError(res, '写入笔记失败。');
-        await sendToolError(callId, errText, code);
+        await sendToolError(callId, errText, code, Boolean(res.data?.errorCode && code !== 'WRITE_OUTCOME_UNKNOWN'));
         return;
       }
       const r = res.result;
@@ -324,8 +393,12 @@ cindy.onHostMessage(async function (msg) {
     const directMethods = new Set([
       'vault_status',
       'search_notes',
+      'list_notes',
       'read_note',
+      'replace_in_note',
+      'manage_tags',
       'daily_note',
+      'write_receipt',
       'graph_links',
       'open_in_obsidian',
     ]);
@@ -334,7 +407,9 @@ cindy.onHostMessage(async function (msg) {
       const res = await callWorker(tool, args, callId);
       if (!res.ok) {
         const { code, msg: errText } = extractWorkerError(res, '执行 Obsidian 工具失败。');
-        await sendToolError(callId, errText, code);
+        const rejectedWrite = tool === 'daily_note' && args.action !== 'read' &&
+          res.data?.errorCode && code !== 'WRITE_OUTCOME_UNKNOWN';
+        await sendToolError(callId, errText, code, Boolean(rejectedWrite));
         return;
       }
       await sendSuccess(callId, summarizeResult(tool, res.result), res.result);

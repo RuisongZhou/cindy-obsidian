@@ -7,6 +7,7 @@ const readline = require('node:readline');
 const { execFile } = require('node:child_process');
 const { promisify } = require('node:util');
 const { TextDecoder } = require('node:util');
+const { prepareWrite, getWriteReceipt } = require('./write-receipts.cjs');
 
 const execFileAsync = promisify(execFile);
 const strictUtf8Decoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: false });
@@ -18,12 +19,12 @@ const MAX_NOTE_INDEX_BYTES = 2 * 1024 * 1024;
 const MAX_TOTAL_INDEX_BYTES = 32 * 1024 * 1024;
 const MAX_SCAN_MS = 10000;
 const MAX_READ_FILE_BYTES = 8 * 1024 * 1024;
+const MAX_LIST_ENTRIES = 1000;
 const MAX_RPC_LINE_BYTES = 4 * 1024 * 1024;
 
 let cachedIndexes = new Map(); // vaultRealPath -> index
 let inflightScans = new Map(); // vaultRealPath -> Promise<index>
 const writeLocks = new Map();  // targetKey -> Promise
-const idempotencyCache = new Map(); // key -> { ts, payloadHash, result }
 
 function makeError(code, message) {
   const err = new Error(message);
@@ -44,15 +45,6 @@ function withWriteLock(lockKey, fn) {
   );
   writeLocks.set(lockKey, settled);
   return next;
-}
-
-function pruneIdempotencyCache() {
-  const now = Date.now();
-  for (const [k, v] of idempotencyCache.entries()) {
-    if (now - v.ts > 30 * 60 * 1000 || idempotencyCache.size > 512) {
-      idempotencyCache.delete(k);
-    }
-  }
 }
 
 function getObsidianConfigCandidates() {
@@ -244,7 +236,7 @@ function resolveVault(params = {}) {
   }
   throw makeError(
     'NO_VAULT_AVAILABLE',
-    '本机尚未检测到可用的 Obsidian 知识库。请在插件工作台点击「切换库」选择文件夹，或先在 Obsidian 中创建 Vault。'
+    '本机尚未检测到可用的 Obsidian 知识库。请在工作台点击「添加知识库」选择文件夹，或先在 Obsidian 中创建知识库。'
   );
 }
 
@@ -694,6 +686,86 @@ function patchFrontmatterPreservingRaw(parsed, fmPatch, extraTags) {
   return { rawBlock: rebuiltBlock, frontmatter: parseFrontmatter(rebuiltBlock).frontmatter };
 }
 
+function cleanTag(value) {
+  const tag = typeof value === 'string' ? value.trim().replace(/^#/, '') : '';
+  if (!/^[\p{L}\p{M}\p{N}_-]+(?:\/[\p{L}\p{M}\p{N}_-]+)*$/u.test(tag) || /^\p{N}+$/u.test(tag)) {
+    throw makeError('INVALID_TAG', '标签必须是完整标签名，例如 #项目/发布。');
+  }
+  return tag;
+}
+
+function tagKey(tag) {
+  return tag.normalize('NFC').toLowerCase();
+}
+
+function readTagScalar(value) {
+  const raw = value.trim();
+  const text = stripQuotes(raw);
+  if (raw === text && (/#/.test(raw) || /^(?:true|false|null|yes|no|on|off|~)$/i.test(raw))) {
+    throw makeError('UNSUPPORTED_TAGS_PROPERTY', '请先把含注释或特殊语法的标签属性转换为字符串列表。');
+  }
+  return text;
+}
+
+function frontmatterTagFields(parsed) {
+  const fields = new Map();
+  const lines = parsed.yamlInner.split(/\r?\n/);
+  for (let i = 0; i < lines.length; i++) {
+    const item = /^(tags?|"(?:tags?)"|'(?:tags?)')\s*:\s*(.*?)\s*$/.exec(lines[i]);
+    if (!item) continue;
+    const field = stripQuotes(item[1]);
+    if (fields.has(field)) throw makeError('UNSUPPORTED_TAGS_PROPERTY', '标签属性重复，无法安全更新。');
+    let value = item[2];
+    let indent = [];
+    for (let offset = i + 1; offset < lines.length; offset++) {
+      const line = lines[offset];
+      if (!line.trim()) continue;
+      if (!/^\s+|^-\s/.test(line)) break;
+      const entry = /^\s*-\s+(.+)$/.exec(line);
+      if (!entry || value) throw makeError('UNSUPPORTED_TAGS_PROPERTY', '标签属性须为简单字符串或字符串列表。');
+      indent.push(entry[1]);
+    }
+    if (value.startsWith('[') && value.endsWith(']')) {
+      value = value.slice(1, -1).trim();
+      indent = value ? value.replace(/,\s*$/, '').split(',') : [];
+    } else if (value) {
+      fields.set(field, readTagScalar(value).split(/[,\s]+/).filter(Boolean).map(cleanTag));
+      continue;
+    }
+    fields.set(field, indent.map((tag) => cleanTag(readTagScalar(tag))));
+  }
+  return fields;
+}
+
+function editNoteTags(parsed, operation, tags) {
+  if (!['list', 'add', 'remove'].includes(operation)) throw makeError('INVALID_TAG_OPERATION', '标签操作必须是 list、add 或 remove。');
+  const fields = frontmatterTagFields(parsed);
+  const existing = new Map([...fields.values()].flat().map((tag) => [tagKey(tag), tag]));
+  const patch = {};
+  const applied = [];
+  const skipped = [];
+  if (operation === 'list') return { tags: [...existing.values()], applied, skipped, patch };
+  if (!Array.isArray(tags) || !tags.length || tags.length > 100) throw makeError('INVALID_TAG', '请传入 1–100 个完整标签。');
+  const requested = new Map(tags.map(cleanTag).map((tag) => [tagKey(tag), tag]));
+  for (const [key, tag] of requested) {
+    if (existing.has(key) === (operation === 'add')) skipped.push(tag);
+    else applied.push(tag);
+  }
+  if (applied.length && operation === 'add') {
+    const field = fields.has('tags') || !fields.has('tag') ? 'tags' : 'tag';
+    patch[field] = [...(fields.get(field) ?? []), ...applied];
+    for (const tag of applied) existing.set(tagKey(tag), tag);
+  } else if (applied.length) {
+    const removed = new Set(applied.map(tagKey));
+    for (const [field, values] of fields) {
+      const remaining = values.filter((tag) => !removed.has(tagKey(tag)));
+      if (remaining.length !== values.length) patch[field] = remaining;
+    }
+    for (const key of removed) existing.delete(key);
+  }
+  return { tags: [...existing.values()], applied, skipped, patch };
+}
+
 // Fence-aware Markdown line scanner: returns line offsets, skips ``` and ~~~ fenced code blocks!
 function scanMarkdownStructure(body) {
   const lines = [];
@@ -725,6 +797,7 @@ function scanMarkdownStructure(body) {
         const info = fenceMatch[2];
         if (marker[0] !== '`' || !info.includes('`')) {
           inFence = { char: marker[0], len: marker.length };
+          ln.inFence = true;
           continue;
         }
       }
@@ -753,7 +826,9 @@ function scanMarkdownStructure(body) {
         }
       }
       nonCodeChunks.push(ln.text.replace(/`[^`]*`/g, ' '));
-    } else if (fenceMatch) {
+    } else {
+      ln.inFence = true;
+      if (!fenceMatch) continue;
       const marker = fenceMatch[1];
       const trailing = fenceMatch[2].trim();
       if (marker[0] === inFence.char && marker.length >= inFence.len && trailing === '') {
@@ -762,6 +837,12 @@ function scanMarkdownStructure(body) {
     }
   }
 
+  const parents = [];
+  for (const heading of headings) {
+    while (parents.length && parents.at(-1).level >= heading.level) parents.pop();
+    parents.push(heading);
+    heading.path = parents.map((item) => item.text);
+  }
   return { lines, headings, tasks, nonCodeText: nonCodeChunks.join('\n'), unclosedFence: Boolean(inFence) };
 }
 
@@ -814,28 +895,33 @@ function extractNoteMetadata(raw) {
     tags: Array.from(tagSet),
     wikilinks,
     embeds,
-    headings: struct.headings.map((h) => ({ level: h.level, text: h.text })),
+    headings: struct.headings.map((h) => ({ level: h.level, text: h.text, path: h.path })),
     headingRanges: struct.headings,
     tasks: struct.tasks,
     unclosedFence: struct.unclosedFence,
   };
 }
 
-function findSectionRange(body, headingQuery) {
+function findSectionRange(body, headingQuery = '', headingPath) {
   const struct = scanMarkdownStructure(body);
+  if (headingPath !== undefined && (!Array.isArray(headingPath) || !headingPath.length ||
+      headingPath.some((part) => typeof part !== 'string' || !part.trim()))) {
+    throw makeError('INVALID_HEADING_PATH', '标题路径必须由至少一个非空标题组成。');
+  }
+  const wantedPath = headingPath?.map((part) => part.trim().toLowerCase());
   const rawQ = headingQuery.trim();
   const explicitLevelMatch = rawQ.match(/^(#{1,6})\s+(.+?)$/);
   const wantedLevel = explicitLevelMatch ? explicitLevelMatch[1].length : null;
   const targetText = (explicitLevelMatch ? explicitLevelMatch[2] : rawQ.replace(/^#+\s*/, '')).trim().toLowerCase();
 
-  const matches = struct.headings.filter(
-    (h) => h.text.toLowerCase() === targetText && (wantedLevel === null || h.level === wantedLevel)
-  );
+  const matches = struct.headings.filter((heading) => wantedPath
+    ? heading.path.length === wantedPath.length && heading.path.every((part, index) => part.toLowerCase() === wantedPath[index])
+    : heading.text.toLowerCase() === targetText && (wantedLevel === null || heading.level === wantedLevel));
   if (matches.length === 0) return { found: false, struct };
   if (matches.length > 1) {
     throw makeError(
       'AMBIGUOUS_HEADING',
-      '笔记中存在多个同名章节 "' + targetText + '"，请带上准确井号层级（如 "## ' + matches[0].text + '"）消歧。'
+      '匹配到多个章节，请使用唯一路径。匹配项：' + matches.slice(0, 12).map((heading) => heading.path.join(' → ')).join('；')
     );
   }
 
@@ -860,12 +946,13 @@ function findSectionRange(body, headingQuery) {
   };
 }
 
-function modifyBodyUnderHeading(body, headingQuery, insertionRaw, mode) {
+function modifyBodyUnderHeading(body, headingQuery, insertionRaw, mode, headingPath) {
   const eol = body.includes('\r\n') ? '\r\n' : '\n';
   const payload = String(insertionRaw).replace(/^(\r?\n)+|(\r?\n)+$/g, '');
-  const sec = findSectionRange(body, headingQuery);
+  const sec = findSectionRange(body, headingQuery, headingPath);
 
   if (!sec.found) {
+    if (headingPath !== undefined) throw makeError('HEADING_NOT_FOUND', '未找到完整标题路径：' + headingPath.join(' → '));
     const fenceClosure = sec.struct.unclosedFence ? eol + '```' + eol : '';
     const headingLine = /^#{1,6}\s/.test(headingQuery.trim())
       ? headingQuery.trim()
@@ -874,7 +961,7 @@ function modifyBodyUnderHeading(body, headingQuery, insertionRaw, mode) {
     return (baseTrimmed ? baseTrimmed + eol + eol : '') + headingLine + eol + eol + payload + eol;
   }
 
-  const prefix = body.slice(0, sec.afterHeadingOffset);
+  const prefix = body.slice(0, sec.afterHeadingOffset) + (sec.afterHeadingOffset === body.length && !body.endsWith('\n') ? eol : '');
   const middle = body.slice(sec.afterHeadingOffset, sec.endOffset);
   const suffix = body.slice(sec.endOffset);
 
@@ -896,6 +983,120 @@ function modifyBodyUnderHeading(body, headingQuery, insertionRaw, mode) {
     eol +
     (suffix ? eol + suffix : '')
   );
+}
+
+function findBlockRange(body, reference) {
+  const id = typeof reference === 'string' ? reference.trim().replace(/^\^/, '') : '';
+  if (!/^[A-Za-z0-9-]{1,128}$/.test(id)) throw makeError('INVALID_BLOCK_ID', '请输入有效的块 ID，例如 ^meeting-summary。');
+  const { lines, headings } = scanMarkdownStructure(body);
+  const headingLines = new Set(headings.map((heading) => heading.lineIndex));
+  const markers = [];
+  const quotedCodeLines = new Set();
+  let quotedFence = null;
+  for (const [index, line] of lines.entries()) {
+    const quote = /^(?: {0,3}>[ \t]?)+/.exec(line.text);
+    if (!quote) quotedFence = null;
+    else if (!line.inFence) {
+      const fence = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line.text.slice(quote[0].length));
+      if (quotedFence) {
+        quotedCodeLines.add(index);
+        if (fence?.[1].startsWith(quotedFence) && !fence[2].trim()) quotedFence = null;
+        continue;
+      }
+      if (fence && (fence[1][0] === '~' || !fence[2].includes('`'))) {
+        quotedFence = fence[1];
+        quotedCodeLines.add(index);
+        continue;
+      }
+    }
+    if (line.inFence || headingLines.has(index) || /^(?: {4}|\t)/.test(line.text)) continue;
+    const marker = /(?:^|[ \t]+)\^([A-Za-z0-9-]+)[ \t]*$/.exec(line.text);
+    if (marker?.[1] === id) markers.push({ index, marker });
+  }
+  if (markers.length > 1) throw makeError('AMBIGUOUS_BLOCK', '笔记中有多个 ^' + id + '，请先消除重复 ID。');
+  if (!markers.length) throw makeError('BLOCK_NOT_FOUND', '未找到块 ^' + id + '。');
+
+  const { index, marker } = markers[0];
+  const markerLine = lines[index];
+  const prefix = markerLine.text.slice(0, marker.index);
+  const standalone = !prefix.trim();
+  let last = index;
+  if (standalone) {
+    while (last > 0 && !lines[--last].text.trim()) {
+      // A standalone marker may follow a blank separator.
+    }
+  }
+  const separator = /^(?: {0,3})(?:[-*_][ \t]*){3,}$/;
+  const isContent = (n) => n >= 0 && !lines[n].inFence && !quotedCodeLines.has(n) && !headingLines.has(n) &&
+    Boolean(lines[n].text.trim()) && !separator.test(lines[n].text) &&
+    !/^\s*\^[A-Za-z0-9-]+\s*$/.test(lines[n].text);
+  if (!isContent(last)) throw makeError('UNSUPPORTED_BLOCK', '该块 ID 没有可安全定位的正文。');
+  const listPrefix = /^[ \t]*(?:[-+*]|\d+[.)])[ \t]+(?:\[[ xX]\][ \t]+)?/;
+  const quotePrefix = /^[ \t]*>[ \t]?/;
+  let first = last;
+  if (standalone || (!listPrefix.test(prefix) && !quotePrefix.test(prefix))) {
+    while (isContent(first - 1) &&
+      (standalone || (!listPrefix.test(lines[first - 1].text) && !quotePrefix.test(lines[first - 1].text))) &&
+      !/\s\^[A-Za-z0-9-]+\s*$/.test(lines[first - 1].text)) first--;
+  }
+
+  const singleLinePrefix = !standalone && first === last ? (listPrefix.exec(prefix) || quotePrefix.exec(prefix))?.[0] || '' : '';
+  const start = lines[first].start + singleLinePrefix.length;
+  const end = standalone ? lines[last].end : markerLine.start + marker.index;
+  if (end <= start || !body.slice(start, end).trim()) {
+    throw makeError('UNSUPPORTED_BLOCK', '该块 ID 没有可安全定位的正文。');
+  }
+  return { id, start, end, standalone, content: body.slice(start, end) };
+}
+
+function selectNoteRange(body, params) {
+  const { heading, headingPath, blockId } = params;
+  if ([heading, headingPath, blockId].filter((value) => value !== undefined).length > 1) {
+    throw makeError('AMBIGUOUS_NOTE_SCOPE', '请只指定 heading、headingPath 或 blockId 中的一项。');
+  }
+  if (blockId !== undefined) {
+    return { type: 'block', ...findBlockRange(body, blockId) };
+  }
+  if (headingPath !== undefined || (typeof heading === 'string' && heading.trim())) {
+    const section = findSectionRange(body, heading, headingPath);
+    if (!section.found) throw makeError('HEADING_NOT_FOUND', '未找到指定标题，可先读取笔记的 headings。');
+    return { type: 'heading', path: section.heading.path, start: section.afterHeadingOffset, end: section.endOffset, content: section.content };
+  }
+  return { type: 'body', start: 0, end: body.length, content: body };
+}
+
+function replaceInBody(body, params, eol) {
+  if (typeof params.find !== 'string' || !params.find.length || typeof params.replace !== 'string') {
+    throw makeError('INVALID_REPLACEMENT', '请填写非空查找文本和替换文本。替换文本可为空字符串。');
+  }
+  if (params.expectedCount !== undefined && (!Number.isSafeInteger(params.expectedCount) || params.expectedCount < 1)) {
+    throw makeError('INVALID_REPLACEMENT', 'expectedCount 必须为正整数。');
+  }
+  const range = selectNoteRange(body, params);
+  const normalizeEol = (value) => value.replace(/\r?\n/g, eol);
+  const needle = normalizeEol(params.find);
+  const replacement = normalizeEol(params.replace);
+  const source = body.slice(range.start, range.end);
+  let count = 0;
+  let offset = 0;
+  while ((offset = source.indexOf(needle, offset)) >= 0) {
+    count++;
+    offset += needle.length;
+  }
+  if (params.dryRun) return { range, count };
+  const all = params.replaceAll === true;
+  if (!count || (!all && count !== 1) || (params.expectedCount !== undefined && count !== params.expectedCount)) {
+    throw makeError('REPLACEMENT_COUNT_MISMATCH', '找到 ' + count + ' 处匹配。请用 dryRun 核对数量，并在需要时限定标题或块。');
+  }
+  const updated = all ? source.replaceAll(needle, () => replacement) : source.replace(needle, () => replacement);
+  return { range, count, body: body.slice(0, range.start) + updated + body.slice(range.end) };
+}
+
+function verifyBlockRange(body, range, lengthDelta) {
+  const next = findBlockRange(body, range.id);
+  if (next.start !== range.start || next.end !== range.end + lengthDelta || next.standalone !== range.standalone) {
+    throw makeError('BLOCK_STRUCTURE_CHANGED', '修改会改变块的结构或引用边界，已取消写入。');
+  }
 }
 
 async function scanVaultIndex(vaultRealPath, force = false) {
@@ -998,7 +1199,7 @@ async function scanVaultIndex(vaultRealPath, force = false) {
               bodyIndexed,
               excerpt: meta.body.replace(/\s+/g, ' ').trim().slice(0, 240),
               searchBodyLower: bodyIndexed ? meta.body.toLowerCase() : '',
-              rawBodySample: bodyIndexed ? meta.body.slice(0, 32768) : '',
+              searchBody: bodyIndexed ? meta.body : '',
             });
           } else if (ext === '.canvas') {
             canvases.push({ path: rel, name: path.basename(entry.name, '.canvas'), size: lst.size, mtimeMs: lst.mtimeMs });
@@ -1189,7 +1390,202 @@ function formatMomentPattern(dateObj, pattern) {
   });
 }
 
+function comparePaths(left, right) {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function relativeFolder(input = '') {
+  const normalized = typeof input === 'string' ? input.replace(/\\/g, '/') : null;
+  if (normalized === '' || normalized === '.') return '';
+  if (normalized === null || /^(?:\/|[A-Za-z]:)|\0/.test(normalized)) {
+    throw makeError('INVALID_FOLDER', '请输入知识库内的相对目录。');
+  }
+  const parts = normalized.replace(/\/+$/, '').split('/');
+  if (parts.some((part) => !part || part.startsWith('.') || SKIP_DIRS.has(part))) {
+    throw makeError('INVALID_FOLDER', '目录路径包含隐藏目录、受保护目录或非法路径段。');
+  }
+  return parts.join('/');
+}
+
+function normalizeWritePolicy(policy) {
+  if (!policy || typeof policy !== 'object' || typeof policy.readOnly !== 'boolean' ||
+      (policy.writeFolders !== null && (!Array.isArray(policy.writeFolders) || policy.writeFolders.length > 32 ||
+        policy.writeFolders.some((folder) => typeof folder !== 'string' || folder.length > 240 || !folder.trim())))) {
+    throw makeError('INVALID_WRITE_POLICY', '写入规则无效。');
+  }
+  const writeFolders = policy.writeFolders === null ? null : [...new Set(policy.writeFolders.map(relativeFolder))];
+  if (writeFolders?.some((folder) => !folder)) {
+    throw makeError('INVALID_WRITE_POLICY', '写入范围必须是库内子目录。要允许写入全库，请明确选择全库。');
+  }
+  return { readOnly: policy.readOnly, writeFolders };
+}
+
+function vaultWritePolicy(vault, settings) {
+  const policies = settings?.vault_write_policies;
+  if (policies === undefined) return { readOnly: false, writeFolders: null };
+  if (!policies || typeof policies !== 'object' || Array.isArray(policies)) {
+    throw makeError('INVALID_WRITE_POLICY', '无法读取知识库写入规则。');
+  }
+  return Object.hasOwn(policies, vault.path)
+    ? normalizeWritePolicy(policies[vault.path])
+    : { readOnly: false, writeFolders: null };
+}
+
+function assertVaultWritable(vault, target, settings) {
+  // Apply overlapping vault rules too, so selecting a parent or child vault cannot bypass a saved restriction.
+  vaultWritePolicy(vault, settings);
+  const insensitive = process.platform === 'darwin' || process.platform === 'win32';
+  const folded = (value) => insensitive ? value.normalize('NFC').toLowerCase() : value;
+  const actual = safeRealpath(target.abs) || target.abs;
+  for (const [root, rawPolicy] of Object.entries(settings?.vault_write_policies ?? {})) {
+    if (!isPathInsideRoot(folded(root), folded(actual))) continue;
+    const policy = normalizeWritePolicy(rawPolicy);
+    if (policy.readOnly) throw makeError('VAULT_READ_ONLY', '该知识库已设为只读。');
+    const relative = actual.split(path.sep).slice(root.split(path.sep).length - (root.endsWith(path.sep) ? 1 : 0)).join('/');
+    if (policy.writeFolders && !policy.writeFolders.some((folder) => relative.startsWith(folder + '/'))) {
+      throw makeError('WRITE_OUTSIDE_ALLOWED_FOLDERS', '「' + target.rel + '」不在允许写入的目录中。');
+    }
+  }
+}
+
+async function listVaultDirectory(vaultPath, folder, depth, extension) {
+  let root = vaultPath;
+  for (const segment of folder ? folder.split('/') : []) {
+    root = path.join(root, segment);
+    const stat = await fsp.lstat(root).catch(() => null);
+    if (!stat?.isDirectory() || stat.isSymbolicLink() || !isPathInsideRoot(vaultPath, safeRealpath(root) || vaultPath)) {
+      throw makeError('FOLDER_NOT_FOUND', '无法列出目录，请检查相对路径以及访问权限。');
+    }
+  }
+  const entries = [];
+  const warnings = [];
+  const startedAt = Date.now();
+  let visits = 0;
+  let truncated = false;
+  async function walk(directory, prefix, remaining) {
+    let children;
+    try {
+      const real = safeRealpath(directory);
+      if (!real || !isPathInsideRoot(vaultPath, real, directory === vaultPath)) throw new Error('Invalid directory');
+      children = await fsp.readdir(real, { withFileTypes: true });
+    } catch {
+      if (directory === root) throw makeError('FOLDER_UNREADABLE', '无法读取所选目录。');
+      warnings.push(prefix);
+      return;
+    }
+    children.sort((a, b) => Number(b.isDirectory()) - Number(a.isDirectory()) || comparePaths(a.name, b.name));
+    for (const child of children) {
+      if (++visits > MAX_INDEX_FILES || Date.now() - startedAt > MAX_SCAN_MS) {
+        truncated = true;
+        return;
+      }
+      if (child.name.startsWith('.') || SKIP_DIRS.has(child.name) || child.isSymbolicLink()) continue;
+      const file = path.join(directory, child.name);
+      const stat = await fsp.lstat(file).catch(() => null);
+      if (!stat || stat.isSymbolicLink() || !isPathInsideRoot(vaultPath, safeRealpath(file) || vaultPath)) continue;
+      const isDirectory = stat.isDirectory();
+      if (!isDirectory && (!stat.isFile() || (extension && path.extname(child.name).toLowerCase() !== extension))) continue;
+      if (entries.length >= MAX_LIST_ENTRIES) {
+        truncated = true;
+        return;
+      }
+      const rel = prefix ? prefix + '/' + child.name : child.name;
+      entries.push(isDirectory
+        ? { path: rel, name: child.name, type: 'directory' }
+        : { path: rel, name: child.name, type: 'file', size: stat.size, mtime: new Date(stat.mtimeMs).toISOString() });
+      if (isDirectory && remaining > 1) await walk(file, rel, remaining - 1);
+      if (truncated) return;
+    }
+  }
+  await walk(root, folder, depth);
+  return { entries, truncated: truncated || warnings.length > 0, unreadableFolders: warnings };
+}
+
+function searchPageOffset(cursor, fingerprint, limit) {
+  if (cursor === undefined) return 0;
+  if (typeof cursor !== 'string' || !/^[a-zA-Z0-9_-]{1,128}$/.test(cursor)) {
+    throw makeError('INVALID_CURSOR', '分页游标无效，请重新搜索。');
+  }
+  const match = /^(\d+):([0-9a-f]{64})$/.exec(Buffer.from(cursor, 'base64url').toString('utf8'));
+  const offset = Number(match?.[1]);
+  if (!match || !Number.isSafeInteger(offset) || offset < limit || offset % limit !== 0) {
+    throw makeError('INVALID_CURSOR', '分页游标无效，请重新搜索。');
+  }
+  if (match[2] !== fingerprint) {
+    throw makeError('STALE_CURSOR', '查询条件或搜索结果已改变，请从第一页重新搜索。');
+  }
+  return offset;
+}
+
+function bodyMatches(note, terms, maxMatches) {
+  const body = note.searchBody;
+  const folded = note.searchBodyLower;
+  if (!folded || !terms.length) return { matches: [], matchesTruncated: false };
+  const needles = [...new Set(terms)].map((term) => ({ term, index: folded.indexOf(term) })).filter((hit) => hit.index >= 0);
+  if (!needles.length) return { matches: [], matchesTruncated: false };
+
+  // Lowercasing can expand a character (for example İ → i + combining dot).
+  let offsets;
+  if (body.length !== folded.length) {
+    offsets = new Uint32Array(folded.length + 1);
+    let original = 0;
+    let normalized = 0;
+    for (const character of body) {
+      const width = character.toLowerCase().length;
+      offsets.fill(original, normalized, normalized + width);
+      original += character.length;
+      normalized += width;
+      offsets[normalized] = original;
+    }
+  }
+  const matches = [];
+  let line = 1;
+  let lineStart = 0;
+  let newline = body.indexOf('\n');
+  while (needles.length && matches.length < maxMatches) {
+    needles.sort((a, b) => a.index - b.index || b.term.length - a.term.length);
+    const hit = needles[0];
+    const endIndex = hit.index + hit.term.length;
+    const start = offsets ? offsets[hit.index] : hit.index;
+    let end = offsets ? offsets[endIndex] : endIndex;
+    if (offsets && end === offsets[endIndex - 1]) end += body.codePointAt(end) > 0xffff ? 2 : 1;
+    while (newline >= 0 && newline < start) {
+      line++;
+      lineStart = newline + 1;
+      newline = body.indexOf('\n', lineStart);
+    }
+    const contextStart = Math.max(lineStart, start - 50);
+    const contextEnd = Math.min(newline < 0 ? body.length : newline, end + 60);
+    if (matches.at(-1)?.start !== start || matches.at(-1)?.end !== end) {
+      matches.push({ start, end, line, column: start - lineStart + 1, text: body.slice(start, end), context: body.slice(contextStart, contextEnd).replace(/\r$/, ''), contextStart });
+    }
+    hit.index = folded.indexOf(hit.term, endIndex);
+    if (hit.index < 0) needles.shift();
+  }
+  return { matches, matchesTruncated: needles.length > 0 };
+}
+
 const handlers = {
+  async inspect_vault_write_policy(params = {}) {
+    const { vault } = resolveVault(params);
+    const policy = params.policy === undefined ? vaultWritePolicy(vault, params.settings) : normalizeWritePolicy(params.policy);
+    return { vault: { id: vault.id, name: vault.name, path: vault.path }, policy };
+  },
+  async list_notes(params = {}) {
+    const { vault } = resolveVault(params);
+    const folder = relativeFolder(params.folder);
+    const depth = params.depth ?? 1;
+    const rawExtension = params.extension ?? '';
+    if (!Number.isInteger(depth) || depth < 1 || depth > 10) {
+      throw makeError('INVALID_DEPTH', '目录深度必须为 1 到 10。');
+    }
+    if (typeof rawExtension !== 'string' || !/^(?:\.?[a-z0-9]{1,16})?$/i.test(rawExtension)) {
+      throw makeError('INVALID_EXTENSION', '请输入文件扩展名，例如 md 或 .canvas。');
+    }
+    const extension = rawExtension ? '.' + rawExtension.replace(/^\./, '').toLowerCase() : '';
+    const listing = await listVaultDirectory(vault.path, folder, depth, extension);
+    return { vault: { id: vault.id, name: vault.name, path: vault.path }, folder, depth, extension, ...listing };
+  },
   async vault_status(params = {}) {
     const settings = params.settings || {};
     const vaults = discoverVaults(settings);
@@ -1248,6 +1644,8 @@ const handlers = {
 
     return {
       activeVault: activeVault ? { id: activeVault.id, name: activeVault.name, path: activeVault.path, open: activeVault.open, source: activeVault.source, exists: activeVault.exists } : null,
+      executionHost: os.hostname().replace(/[\u0000-\u001f\u007f-\u009f]/g, '').trim().slice(0, 120),
+      writePolicy: activeVault ? vaultWritePolicy(activeVault, settings) : null,
       activeVaultError,
       vaults: vaults.map((v) => ({ id: v.id, name: v.name, path: v.path, open: v.open, source: v.source, exists: v.exists })),
       obsidianCli: cli,
@@ -1263,7 +1661,8 @@ const handlers = {
     const tagFilter = typeof params.tag === 'string' ? params.tag.trim().replace(/^#+/, '').toLowerCase() : '';
     const propKey = typeof params.propertyKey === 'string' ? params.propertyKey.trim() : '';
     const propVal = params.propertyValue !== undefined ? String(params.propertyValue).trim().toLowerCase() : '';
-    const limit = Math.min(Math.max(Number(params.limit) || 15, 1), 50);
+    const limit = Math.trunc(Math.min(Math.max(Number(params.limit) || 15, 1), 50));
+    const maxMatches = Math.trunc(Math.min(Math.max(Number(params.maxMatchesPerNote) || 8, 1), 20));
     const terms = query ? query.toLowerCase().split(/\s+/).filter(Boolean) : [];
 
     const scored = [];
@@ -1283,7 +1682,6 @@ const handlers = {
       }
 
       let score = 0;
-      let snippet = note.excerpt;
       if (terms.length === 0) {
         score = 1;
       } else {
@@ -1302,7 +1700,8 @@ const handlers = {
           else if (titleLower.includes(term)) termScore += 55;
           if (aliasLower.includes(term)) termScore += 45;
           if (pathLower.includes(term)) termScore += 25;
-          if (tagsLower.includes(term)) termScore += 30;
+          const tagTerm = term.replace(/^#(?=.)/, '');
+          if (tagsLower.includes(tagTerm)) termScore += 30;
           if (headingsLower.includes(term)) termScore += 25;
           if (bodyLower && bodyLower.includes(term)) termScore += 15;
           if (termScore === 0) { matchedAll = false; break; }
@@ -1310,39 +1709,44 @@ const handlers = {
         }
         if (!matchedAll) continue;
 
-        if (note.rawBodySample) {
-          const sampleLower = note.rawBodySample.toLowerCase();
-          const firstPos = sampleLower.indexOf(terms[0]);
-          if (firstPos !== -1) {
-            const start = Math.max(0, firstPos - 60);
-            const end = Math.min(note.rawBodySample.length, firstPos + 180);
-            snippet = (start > 0 ? '…' : '') + note.rawBodySample.slice(start, end).replace(/\s+/g, ' ').trim() + (end < note.rawBodySample.length ? '…' : '');
-          }
-        }
       }
-      scored.push({ score, note, snippet });
+      scored.push({ score, note });
     }
 
-    scored.sort((a, b) => (b.score !== a.score ? b.score - a.score : b.note.mtimeMs - a.note.mtimeMs));
-    const results = scored.slice(0, limit).map(({ score, note, snippet }) => ({
-      path: note.path,
-      title: note.title,
-      folder: note.folder,
-      tags: note.tags,
-      aliases: note.aliases,
-      frontmatter: note.frontmatter,
-      headings: note.headings.slice(0, 8).map((h) => '#'.repeat(h.level) + ' ' + h.text),
-      backlinkCount: (idx.backlinksMap.get(note.path) || []).length,
-      outlinkCount: note.wikilinks.length + note.embeds.length,
-      mtime: new Date(note.mtimeMs).toISOString(),
-      score,
-      snippet,
-    }));
+    scored.sort((a, b) => b.score - a.score || b.note.mtimeMs - a.note.mtimeMs || comparePaths(a.note.path, b.note.path));
+    const fingerprint = crypto.createHash('sha256').update(JSON.stringify([
+      vault.path, query, folderPrefix, tagFilter, propKey, propVal, limit, maxMatches,
+      idx.truncatedScan, scored.map(({ score, note }) => [note.path, note.mtimeMs, note.size, note.bodyIndexed, score]),
+    ])).digest('hex');
+    const offset = searchPageOffset(params.cursor, fingerprint, limit);
+    if (offset && offset >= scored.length) throw makeError('INVALID_CURSOR', '分页游标已超出搜索结果。');
+    const results = scored.slice(offset, offset + limit).map(({ score, note }) => {
+      const locations = bodyMatches(note, terms, maxMatches);
+      return {
+        path: note.path,
+        title: note.title,
+        folder: note.folder,
+        tags: note.tags,
+        aliases: note.aliases,
+        frontmatter: note.frontmatter,
+        headings: note.headings.slice(0, 8).map((h) => '#'.repeat(h.level) + ' ' + h.text),
+        backlinkCount: (idx.backlinksMap.get(note.path) || []).length,
+        outlinkCount: note.wikilinks.length + note.embeds.length,
+        mtime: new Date(note.mtimeMs).toISOString(),
+        score,
+        snippet: locations.matches[0]?.context.trim() || note.excerpt,
+        ...locations,
+      };
+    });
+    const nextOffset = offset + results.length;
 
     return {
       vault: { id: vault.id, name: vault.name, path: vault.path },
       totalMatches: scored.length,
       truncatedScan: idx.truncatedScan,
+      partialBodyIndex: idx.notes.some((note) => !note.bodyIndexed),
+      offset,
+      nextCursor: nextOffset < scored.length ? Buffer.from(nextOffset + ':' + fingerprint).toString('base64url') : null,
       results,
     };
   },
@@ -1356,13 +1760,15 @@ const handlers = {
       throw makeError('MISSING_NOTE_TARGET', '请提供要读取的笔记 path（精确相对路径）或 title（笔记标题 / 别名 / 双链名）。');
     }
 
+    const blockLink = /^\[\[([^#|\]]+)#\^([A-Za-z0-9-]+)(?:\|[^\]]*)?\]\]$/
+      .exec((hasExplicitPath ? params.path : params.title).trim());
     let targetInfo;
     let ambiguousCandidates = [];
     if (hasExplicitPath) {
       // Explicit path is strictly resolved without fuzzy title/alias guessing!
       targetInfo = resolveSafeVaultTarget(vault.path, params.path, { requiredExt: '.md', mustExist: true });
     } else {
-      const { note, ambiguous } = idx.resolveLinkTarget(params.title);
+      const { note, ambiguous } = idx.resolveLinkTarget(blockLink?.[1] ?? params.title);
       if (ambiguous.length > 1) {
         throw makeError(
           'AMBIGUOUS_NOTE_TITLE',
@@ -1379,17 +1785,9 @@ const handlers = {
     const { text: raw, stat } = await readStrictUtf8File(targetInfo.abs);
     const meta = extractNoteMetadata(raw);
 
-    let content = meta.body;
-    let selectedHeading = null;
-    if (typeof params.heading === 'string' && params.heading.trim()) {
-      const sec = findSectionRange(meta.body, params.heading.trim());
-      if (!sec.found) {
-        const available = meta.headings.map((h) => '#'.repeat(h.level) + ' ' + h.text).join(' / ') || '无标题章节';
-        throw makeError('HEADING_NOT_FOUND', '笔记 "' + targetInfo.rel + '" 中未找到章节 "' + params.heading + '"。可用章节: ' + available);
-      }
-      content = sec.content;
-      selectedHeading = params.heading.trim();
-    }
+    const scope = selectNoteRange(meta.body, { ...params, blockId: params.blockId ?? blockLink?.[2] });
+    let content = scope.content;
+    const selectedHeading = scope.type === 'heading' ? params.heading?.trim() || scope.path.at(-1) : null;
 
     const maxChars = Math.min(Math.max(Number(params.maxChars) || 40000, 500), 120000);
     const truncated = content.length > maxChars;
@@ -1418,6 +1816,8 @@ const handlers = {
       mtimeMs: stat.mtimeMs,
       size: stat.size,
       selectedHeading,
+      selectedHeadingPath: scope.type === 'heading' ? scope.path : undefined,
+      selectedBlock: scope.type === 'block' ? scope.id : undefined,
       truncated,
       frontmatter: meta.frontmatter,
       tags: meta.tags,
@@ -1434,6 +1834,7 @@ const handlers = {
     const { vault } = resolveVault(params);
     const requiredExt = params.ext === '.canvas' ? '.canvas' : '.md';
     const targetInfo = resolveSafeVaultTarget(vault.path, params.path, { requiredExt });
+    assertVaultWritable(vault, targetInfo, params.settings);
     let mtimeMs = null;
     if (targetInfo.exists) {
       const st = await fsp.lstat(targetInfo.abs);
@@ -1447,6 +1848,15 @@ const handlers = {
     };
   },
 
+  async write_receipt(params = {}) {
+    if (!['write_note', 'daily_note'].includes(params.method) || !params.vault) {
+      throw makeError('INVALID_WRITE_RECEIPT', '请指定原写入工具和知识库 ID。');
+    }
+    const { vault } = resolveVault(params);
+    if (vault.id !== params.vault) throw makeError('INVALID_WRITE_RECEIPT', '请使用原知识库 ID 查询回执。');
+    return getWriteReceipt(vault, params.method, params.idempotencyKey);
+  },
+
   async write_note(params = {}) {
     const { vault } = resolveVault(params);
     const mode = params.mode || 'create';
@@ -1458,31 +1868,37 @@ const handlers = {
       'append-heading',
       'prepend-heading',
       'replace-section',
+      'replace-block',
+      'append-block',
+      'prepend-block',
+      'replace-text',
+      'manage-tags',
       'update-frontmatter',
       'delete',
     ]);
     if (!validModes.has(mode)) {
       throw makeError('INVALID_WRITE_MODE', '不支持的写入模式 "' + mode + '"。');
     }
+    const isBlockEdit = mode.endsWith('-block');
+    const isTextEdit = mode === 'replace-text';
+    const isHeadingEdit = ['append-heading', 'prepend-heading', 'replace-section'].includes(mode);
+    if ((params.blockId !== undefined && !isBlockEdit && !isTextEdit) ||
+        (params.headingPath !== undefined && !isHeadingEdit && !isTextEdit)) {
+      throw makeError('INVALID_NOTE_SCOPE', '当前写入模式不支持指定的块或标题路径。');
+    }
 
     const targetInfo = resolveSafeVaultTarget(vault.path, params.path, { requiredExt: '.md' });
+    const tagRead = mode === 'manage-tags' && params.operation === 'list';
+    if (!(isTextEdit && params.dryRun) && !tagRead) assertVaultWritable(vault, targetInfo, params.settings);
     const lockKey = vault.path + '::' + targetInfo.rel;
 
     return withWriteLock(lockKey, async () => {
-      pruneIdempotencyCache();
-      const idemKey = typeof params.idempotencyKey === 'string' && params.idempotencyKey.trim()
-        ? vault.id + '::write_note::' + params.idempotencyKey.trim()
-        : null;
-      const payloadHash = idemKey
-        ? crypto.createHash('sha256').update(JSON.stringify({ rel: targetInfo.rel, mode, heading: params.heading, content: params.content, frontmatter: params.frontmatter, tags: params.tags })).digest('hex')
-        : null;
-      if (idemKey && idempotencyCache.has(idemKey)) {
-        const prev = idempotencyCache.get(idemKey);
-        if (prev.payloadHash !== payloadHash) {
-          throw makeError('IDEMPOTENCY_KEY_REUSED', '同一请求幂等键不能用于不同的笔记修改内容。');
-        }
-        return prev.result;
-      }
+      const { previous, commit } = await prepareWrite(vault, 'write_note', params.dryRun || tagRead ? null : params.idempotencyKey, {
+        rel: targetInfo.rel, mode, heading: params.heading, headingPath: params.headingPath, blockId: params.blockId,
+        content: params.content, frontmatter: params.frontmatter, tags: params.tags, operation: params.operation,
+        find: params.find, replace: params.replace, replaceAll: params.replaceAll, expectedCount: params.expectedCount,
+      });
+      if (previous) return previous;
 
       const freshTarget = resolveSafeVaultTarget(vault.path, targetInfo.rel, { requiredExt: '.md' });
 
@@ -1497,25 +1913,25 @@ const handlers = {
         const trashRel = '.trash/' + freshTarget.rel.replace(/\//g, '__').replace(/\.md$/i, '') + '.' + Date.now() + '-' + crypto.randomBytes(3).toString('hex') + '.md';
         const trashTarget = resolveSafeVaultTarget(vault.path, trashRel, { requiredExt: '.md', allowProtectedRoot: '.trash' });
         await ensureSafeParentDirs(vault.path, trashTarget.segments);
-        const fh = await fsp.open(trashTarget.abs, 'wx', 0o600);
-        await fh.close();
-        await fsp.rename(freshTarget.abs, trashTarget.abs);
-        invalidateVaultCache(vault.path);
-        const delRes = {
-          action: 'moved_to_obsidian_trash',
-          vault: { id: vault.id, name: vault.name, path: vault.path },
-          path: freshTarget.rel,
-          trashFile: trashTarget.rel,
-        };
-        if (idemKey) idempotencyCache.set(idemKey, { ts: Date.now(), payloadHash, result: delRes });
-        return delRes;
+        return commit(async () => {
+          const fh = await fsp.open(trashTarget.abs, 'wx', 0o600);
+          await fh.close();
+          await fsp.rename(freshTarget.abs, trashTarget.abs);
+          invalidateVaultCache(vault.path);
+          return {
+            action: 'moved_to_obsidian_trash',
+            vault: { id: vault.id, name: vault.name, path: vault.path },
+            path: freshTarget.rel,
+            trashFile: trashTarget.rel,
+          };
+        });
       }
 
       if (mode === 'create' && freshTarget.exists) {
         throw makeError('NOTE_ALREADY_EXISTS', '笔记 "' + freshTarget.rel + '" 已存在。若需追加请使用 mode="append" 或 "append-heading"，若确实需要覆盖请使用 mode="overwrite"。');
       }
-      if (mode === 'update-frontmatter' && !freshTarget.exists) {
-        throw makeError('NOTE_NOT_FOUND', '要更新 Frontmatter 的笔记 "' + freshTarget.rel + '" 不存在。');
+      if ((mode === 'update-frontmatter' || mode === 'manage-tags' || isBlockEdit || isTextEdit || params.headingPath !== undefined) && !freshTarget.exists) {
+        throw makeError('NOTE_NOT_FOUND', '要修改的笔记 "' + freshTarget.rel + '" 不存在。');
       }
 
       const incomingContent = typeof params.content === 'string' ? params.content : '';
@@ -1543,10 +1959,37 @@ const handlers = {
       }
 
       const eol = baseParsed.eol || '\n';
-      const patchedFm = patchFrontmatterPreservingRaw(baseParsed, incomingFm, incomingTags);
+      const tagEdit = mode === 'manage-tags' ? editNoteTags(baseParsed, params.operation, params.tags) : null;
+      const tagResult = tagEdit ? { tags: tagEdit.tags, applied: tagEdit.applied, skipped: tagEdit.skipped, location: 'frontmatter' } : null;
+      if (tagEdit && !tagEdit.applied.length) {
+        return { action: params.operation, path: freshTarget.rel, ...tagResult };
+      }
+      const patchedFm = patchFrontmatterPreservingRaw(baseParsed, tagEdit?.patch ?? incomingFm, tagEdit ? null : incomingTags);
 
       let nextBody = baseParsed.body;
-      if (mode === 'append') {
+      let editDetails;
+      if (isTextEdit) {
+        const edit = replaceInBody(nextBody, params, eol);
+        editDetails = { matchCount: edit.count, scope: edit.range.type, headingPath: edit.range.path, blockId: edit.range.id };
+        if (params.dryRun) {
+          return { action: 'preview', path: freshTarget.rel, mtimeMs: origMtimeMs, ...editDetails };
+        }
+        if (edit.range.type === 'block') verifyBlockRange(edit.body, edit.range, edit.body.length - nextBody.length);
+        nextBody = edit.body;
+      } else if (isBlockEdit) {
+        const block = selectNoteRange(nextBody, params);
+        if (block.type !== 'block' || !incomingContent.trim()) {
+          throw makeError('INVALID_BLOCK_EDIT', '块写入需要 blockId 和非空正文。');
+        }
+        const payload = incomingContent.replace(/^(?:\r?\n)+|(?:\r?\n)+$/g, '').replace(/\r?\n/g, eol);
+        const separator = block.standalone ? eol : ' ';
+        const updated = mode === 'replace-block' ? payload :
+          mode === 'prepend-block' ? payload + separator + block.content : block.content + separator + payload;
+        const modified = nextBody.slice(0, block.start) + updated + nextBody.slice(block.end);
+        verifyBlockRange(modified, block, updated.length - block.content.length);
+        nextBody = modified;
+        editDetails = { scope: 'block', blockId: block.id };
+      } else if (mode === 'append') {
         const struct = scanMarkdownStructure(nextBody);
         const safeBase = struct.unclosedFence ? nextBody + eol + '```' : nextBody;
         const trimmedBase = safeBase.replace(/(\r?\n)+$/, '');
@@ -1556,39 +1999,51 @@ const handlers = {
         const payload = incomingContent.replace(/^(\r?\n)+|(\r?\n)+$/g, '');
         const rest = nextBody.replace(/^(\r?\n)+/, '');
         nextBody = payload + (rest ? eol + eol + rest : eol);
-      } else if (mode === 'append-heading' || mode === 'prepend-heading' || mode === 'replace-section') {
-        if (!params.heading || !String(params.heading).trim()) {
+      } else if (isHeadingEdit) {
+        if (params.headingPath !== undefined && params.heading !== undefined) {
+          throw makeError('AMBIGUOUS_NOTE_SCOPE', '请在 heading 和 headingPath 中只指定一项。');
+        }
+        if (params.headingPath === undefined && (!params.heading || !String(params.heading).trim())) {
           throw makeError('MISSING_HEADING', '模式 "' + mode + '" 需要指定目标章节标题参数 heading。');
         }
-        nextBody = modifyBodyUnderHeading(nextBody, String(params.heading), incomingContent, mode);
-      } else if (mode === 'update-frontmatter') {
+        nextBody = modifyBodyUnderHeading(nextBody, params.heading, incomingContent, mode, params.headingPath);
+      } else if (mode === 'update-frontmatter' || tagEdit) {
         // Preserve exact body byte-for-byte!
       } else {
         // create or overwrite: preserve exact body except ensuring trailing newline
         if (nextBody && !nextBody.endsWith('\n')) nextBody += eol;
       }
 
-      const finalRaw = patchedFm.rawBlock + (patchedFm.rawBlock ? nextBody.replace(/^\r?\n/, '') : nextBody);
-      const bytesWritten = await atomicWriteUtf8File(vault.path, freshTarget, finalRaw, {
-        createOnly: mode === 'create',
-        expectedMtimeMs: freshTarget.exists ? origMtimeMs : null,
-        preserveBom: origBom,
+      const exactBody = isBlockEdit || isTextEdit || tagEdit || params.headingPath !== undefined;
+      const finalRaw = patchedFm.rawBlock + (patchedFm.rawBlock && !exactBody ? nextBody.replace(/^\r?\n/, '') : nextBody);
+      return commit(async () => {
+        const bytesWritten = await atomicWriteUtf8File(vault.path, freshTarget, finalRaw, {
+          createOnly: mode === 'create',
+          expectedMtimeMs: freshTarget.exists ? origMtimeMs : null,
+          preserveBom: origBom,
+        });
+        invalidateVaultCache(vault.path);
+        const afterStat = await fsp.lstat(freshTarget.abs);
+        return {
+          action: tagEdit ? params.operation : freshTarget.exists ? mode : 'created',
+          vault: { id: vault.id, name: vault.name, path: vault.path },
+          path: freshTarget.rel,
+          bytesWritten,
+          mtimeMs: afterStat.mtimeMs,
+          frontmatter: patchedFm.frontmatter,
+          ...editDetails,
+          ...tagResult,
+        };
       });
-
-      const afterStat = await fsp.lstat(freshTarget.abs);
-      invalidateVaultCache(vault.path);
-
-      const writeResult = {
-        action: freshTarget.exists ? mode : 'created',
-        vault: { id: vault.id, name: vault.name, path: vault.path },
-        path: freshTarget.rel,
-        bytesWritten,
-        mtimeMs: afterStat.mtimeMs,
-        frontmatter: patchedFm.frontmatter,
-      };
-      if (idemKey) idempotencyCache.set(idemKey, { ts: Date.now(), payloadHash, result: writeResult });
-      return writeResult;
     });
+  },
+
+  async replace_in_note(params = {}) {
+    return handlers.write_note({ ...params, mode: 'replace-text' });
+  },
+
+  async manage_tags(params = {}) {
+    return handlers.write_note({ ...params, mode: 'manage-tags' });
   },
 
   async daily_note(params = {}) {
@@ -1631,20 +2086,13 @@ const handlers = {
       return { exists: true, date: isoDate, ...note };
     }
 
+    assertVaultWritable(vault, targetInfo, params.settings);
     const lockKey = vault.path + '::' + targetInfo.rel;
     const writeMeta = await withWriteLock(lockKey, async () => {
-      pruneIdempotencyCache();
-      const idemKey = typeof params.idempotencyKey === 'string' && params.idempotencyKey.trim()
-        ? vault.id + '::daily_note::' + params.idempotencyKey.trim()
-        : null;
-      const payloadHash = idemKey
-        ? crypto.createHash('sha256').update(JSON.stringify({ rel: targetInfo.rel, action, heading: params.heading, content: params.content, timestamp: params.timestamp })).digest('hex')
-        : null;
-      if (idemKey && idempotencyCache.has(idemKey)) {
-        const prev = idempotencyCache.get(idemKey);
-        if (prev.payloadHash !== payloadHash) throw makeError('IDEMPOTENCY_KEY_REUSED', '同一幂等键不能用于不同的日记内容。');
-        return prev.result;
-      }
+      const { previous, commit } = await prepareWrite(vault, 'daily_note', params.idempotencyKey, {
+        rel: targetInfo.rel, action, heading: params.heading, content: params.content, timestamp: params.timestamp,
+      });
+      if (previous) return previous;
 
       const freshTarget = resolveSafeVaultTarget(vault.path, targetInfo.rel, { requiredExt: '.md' });
       let baseRaw = '';
@@ -1674,9 +2122,7 @@ const handlers = {
       }
 
       if (action === 'ensure' && freshTarget.exists) {
-        const res = { committed: false, action: 'already_exists', path: freshTarget.rel, templateWarning };
-        if (idemKey) idempotencyCache.set(idemKey, { ts: Date.now(), payloadHash, result: res });
-        return res;
+        return { committed: false, action: 'already_exists', path: freshTarget.rel, templateWarning };
       }
 
       let finalRaw = baseRaw;
@@ -1700,15 +2146,15 @@ const handlers = {
       }
 
       // Single atomic commit whether initializing template + first entry or appending to existing daily note!
-      await atomicWriteUtf8File(vault.path, freshTarget, finalRaw, {
-        createOnly: !freshTarget.exists,
-        expectedMtimeMs: freshTarget.exists ? origMtimeMs : null,
-        preserveBom: origBom,
+      return commit(async () => {
+        await atomicWriteUtf8File(vault.path, freshTarget, finalRaw, {
+          createOnly: !freshTarget.exists,
+          expectedMtimeMs: freshTarget.exists ? origMtimeMs : null,
+          preserveBom: origBom,
+        });
+        invalidateVaultCache(vault.path);
+        return { committed: true, action: freshTarget.exists ? action : 'created_and_' + action, path: freshTarget.rel, templateWarning };
       });
-      invalidateVaultCache(vault.path);
-      const res = { committed: true, action: freshTarget.exists ? action : 'created_and_' + action, path: freshTarget.rel, templateWarning };
-      if (idemKey) idempotencyCache.set(idemKey, { ts: Date.now(), payloadHash, result: res });
-      return res;
     });
 
     try {
@@ -1810,13 +2256,13 @@ const handlers = {
       for (const candidate of idx.notes) {
         if (linkedSet.has(candidate.path) || !candidate.searchBodyLower) continue;
         const pos = candidate.searchBodyLower.indexOf(titleLower);
-        if (pos !== -1 && candidate.rawBodySample) {
+        if (pos !== -1 && candidate.searchBody) {
           const start = Math.max(0, pos - 40);
-          const end = Math.min(candidate.rawBodySample.length, pos + 100);
+          const end = Math.min(candidate.searchBody.length, pos + 100);
           unlinkedMentions.push({
             path: candidate.path,
             title: candidate.title,
-            context: candidate.rawBodySample.slice(start, end).replace(/\s+/g, ' ').trim(),
+            context: candidate.searchBody.slice(start, end).replace(/\s+/g, ' ').trim(),
           });
           if (unlinkedMentions.length >= 15) break;
         }
@@ -1897,6 +2343,7 @@ const handlers = {
     if (!['create', 'upsert', 'overwrite'].includes(normalizedAction)) {
       throw makeError('INVALID_CANVAS_ACTION', '不支持的 canvas action "' + action + '"（可选 list / read / create / upsert / overwrite）。');
     }
+    assertVaultWritable(vault, targetInfo, params.settings);
 
     const validateNode = (n, idx, existingNode = null) => {
       if (!n || typeof n !== 'object' || Array.isArray(n)) {
@@ -2055,7 +2502,7 @@ const handlers = {
   },
 
   async open_in_obsidian(params = {}) {
-    const { vault } = resolveVault(params);
+    const { vault, vaults } = resolveVault(params);
     const cli = await detectObsidianCli();
     let relPath = '';
     let absTarget = vault.path;
@@ -2072,7 +2519,8 @@ const handlers = {
       absTarget = checked.abs;
     }
 
-    if (cli.running && cli.cliEnabled && cli.binary && relPath && vault.source === 'obsidian') {
+    const uniqueName = !vaults.some((item) => item.id !== vault.id && item.exists && item.name.toLowerCase() === vault.name.toLowerCase());
+    if (cli.running && cli.cliEnabled && cli.binary && relPath && vault.source === 'obsidian' && uniqueName) {
       try {
         await execFileAsync(cli.binary, ['vault=' + vault.name, 'open', 'path=' + relPath], { timeout: 3000 });
         return { launchRequested: true, method: 'obsidian-cli', vault: { id: vault.id, name: vault.name }, path: relPath };
@@ -2082,11 +2530,7 @@ const handlers = {
     }
 
     // Use full path URI (obsidian://open?path=...) when registered by path to avoid duplicate vault name ambiguity!
-    const uri = vault.source === 'obsidian' && /^[0-9a-f]{8,}$/i.test(vault.id) && relPath
-      ? 'obsidian://open?path=' + encodeURIComponent(absTarget)
-      : (relPath
-          ? 'obsidian://open?path=' + encodeURIComponent(absTarget)
-          : 'obsidian://open?path=' + encodeURIComponent(vault.path));
+    const uri = 'obsidian://open?path=' + encodeURIComponent(absTarget);
 
     if (process.platform === 'darwin') {
       await execFileAsync('/usr/bin/open', [uri], { timeout: 3000 });
@@ -2116,6 +2560,7 @@ const handlers = {
     const { vault } = resolved;
     const idx = await scanVaultIndex(vault.path);
     const q = typeof params.query === 'string' ? params.query.trim().toLowerCase() : '';
+    const tagQuery = q.replace(/^#(?=.)/, '');
     const refStyle = params.settings && (params.settings.insert_style || params.settings.insertStyle) === 'path' ? 'path' : 'wikilink';
 
     const matches = [];
@@ -2130,7 +2575,7 @@ const handlers = {
         else if (tl.startsWith(q)) s = 80;
         else if (tl.includes(q)) s = 60;
         else if (pl.includes(q)) s = 40;
-        else if (note.tags.some((t) => t.toLowerCase().includes(q))) s = 30;
+        else if (note.tags.some((t) => t.toLowerCase().includes(tagQuery))) s = 30;
         if (s > 0) matches.push({ score: s, note });
       }
     }

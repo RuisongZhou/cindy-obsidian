@@ -1,9 +1,9 @@
 {
   "schemaVersion": 3,
-  "minCindyVersion": "0.1.141",
+  "minCindyVersion": "0.1.143",
   "id": "obsidian-vault",
   "name": "Obsidian 知识库",
-  "description": "深度连接本机 Obsidian 知识库：支持 @ 实时搜笔记、双链图谱遍历、按章节非破坏性编辑、日记沉淀与消息一键入库。",
+  "description": "在 Cindy 中搜索和引用本机 Obsidian 笔记，沿双链浏览，把对话保存到知识库，或快速记录今日日记。",
   "whenToUse": "用户想查询、搜索、阅读、整理、创建或修改 Obsidian 笔记与知识库（Vault）、每日日记（Daily Note）、双链与反向链接、标签属性、Canvas 思维白板，或将对话结论存入第二大脑时找我",
   "icon": "assets/icon.png",
   "readme": {
@@ -12,10 +12,12 @@
   },
   "locales": {
     "en": "locales/en.json",
-    "zh-CN": "locales/zh-CN.json"
+    "zh-CN": "locales/zh-CN.json",
+    "ja": "locales/ja.json",
+    "ko": "locales/ko.json"
   },
-  "version": "1.0.1",
-  "releaseNotes": "安全与数据完整性加固：限制已注册 Vault 边界与符号链接防越界、原子写盘与并发互斥、原样保留未改动 YAML Frontmatter、跳过代码块识别 Markdown 章节、支持 Canvas 增量合并与多语言工具说明。",
+  "version": "1.5.0",
+  "releaseNotes": "工作台显示知识库所在电脑。笔记和日记的写入回执保存在执行电脑，断线后可查询原请求，重试不会重复追加。新增每个知识库的只读开关和目录级写入范围，覆盖笔记、日记、Canvas 和回收站。新增 Frontmatter 标签按完整标签名添加、移除和列出。包含 1.2.0 的目录与搜索增强、1.3.0 的标题路径和块编辑，以及 1.1.1 的回复入库修复。",
   "entry": "main.js",
   "launch": "on-demand",
   "command": "obsidian",
@@ -71,8 +73,37 @@
       }
     },
     {
+      "name": "list_notes",
+      "description": "列出已登记知识库内的子目录和文件。支持相对目录、深度和扩展名过滤，仅扫描目录元数据。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "folder": {
+            "type": "string",
+            "description": "库内相对目录。省略或传空字符串从根目录开始。"
+          },
+          "depth": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 10,
+            "default": 1,
+            "description": "目录深度。1 只列直接子项。"
+          },
+          "extension": {
+            "type": "string",
+            "description": "可选文件扩展名，如 md 或 .canvas。目录始终返回。"
+          },
+          "vault": {
+            "type": "string",
+            "description": "已登记知识库的 ID、名称或路径，默认为当前默认库。"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
       "name": "search_notes",
-      "description": "在 Obsidian 知识库中组合检索笔记：支持关键词全文/标题/别名匹配、目录前缀、#嵌套标签与 YAML Frontmatter 属性过滤，返回相关性排序与摘要片段。",
+      "description": "搜索笔记，支持关键词、目录、标签和属性过滤，按相关性排序并分页。每条结果可返回正文命中位置。",
       "parameters": {
         "type": "object",
         "properties": {
@@ -98,7 +129,7 @@
           },
           "limit": {
             "type": "number",
-            "description": "返回条数上限（1–50，默认 15）"
+            "description": "每页条数（1–50，默认 15）。"
           },
           "refresh": {
             "type": "boolean",
@@ -107,6 +138,18 @@
           "vault": {
             "type": "string",
             "description": "可选：已登记的目标知识库 ID 或名称"
+          },
+          "cursor": {
+            "type": "string",
+            "maxLength": 128,
+            "description": "续页时原样传回 nextCursor，查询及每页大小须一致。"
+          },
+          "maxMatchesPerNote": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 20,
+            "default": 8,
+            "description": "每篇笔记返回的正文命中上限，1–20，默认 8。"
           }
         },
         "additionalProperties": false
@@ -114,7 +157,7 @@
     },
     {
       "name": "read_note",
-      "description": "读取单篇 Obsidian 笔记正文（或指定 Markdown 章节，包含其子章节直到下一同级标题），同时解析返回其 YAML Frontmatter、#标签、章节大纲、待办统计、[[出链]] 与反向链接（Backlinks）。",
+      "description": "读取整篇 Obsidian 笔记、标题章节或 ^块 ID。headings 返回每个标题的完整路径，可用于定位重名章节。",
       "parameters": {
         "type": "object",
         "properties": {
@@ -137,6 +180,22 @@
           "vault": {
             "type": "string",
             "description": "可选：已登记的目标知识库 ID 或名称"
+          },
+          "headingPath": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 6,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "description": "完整标题路径，例如 [\"项目 A\", \"结论\"]。与 heading 和 blockId 互斥。"
+          },
+          "blockId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 129,
+            "description": "Obsidian 块 ID，例如 ^meeting-summary。与 heading 和 headingPath 互斥。"
           }
         },
         "additionalProperties": false
@@ -144,7 +203,7 @@
     },
     {
       "name": "write_note",
-      "description": "创建或非破坏性编辑 Obsidian 笔记：支持新建、末尾/开头追加、按 Markdown 标题章节追加/前置/替换（replace-section 替换该标题至下一同级或更高级标题之间的范围，自动忽略围栏代码块中的 # 行）、无损更新 YAML Frontmatter 键值，以及经用户弹窗确认后覆盖或移入 .trash 回收站。",
+      "description": "创建或编辑 Obsidian 笔记，支持正文、标题路径、块 ID 和 Frontmatter。覆盖已有笔记及移入回收站前需要 Cindy 确认。",
       "parameters": {
         "type": "object",
         "properties": {
@@ -163,9 +222,12 @@
               "replace-section",
               "update-frontmatter",
               "overwrite",
-              "delete"
+              "delete",
+              "append-block",
+              "prepend-block",
+              "replace-block"
             ],
-            "description": "写入模式：修改既有笔记优先用 append / append-heading / replace-section / update-frontmatter（未改动的 Frontmatter 区块逐字节保留）；overwrite 与 delete 会先弹出宿主确认框"
+            "description": "标题写入用 append-heading、prepend-heading 或 replace-section，块写入用 append-block、prepend-block 或 replace-block。"
           },
           "heading": {
             "type": "string",
@@ -194,12 +256,104 @@
           "vault": {
             "type": "string",
             "description": "可选：已登记的目标知识库 ID 或名称"
+          },
+          "headingPath": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 6,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "description": "完整标题路径，例如 [\"项目 A\", \"结论\"]。与 heading 和 blockId 互斥。"
+          },
+          "blockId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 129,
+            "description": "Obsidian 块 ID，例如 ^meeting-summary。与 heading 和 headingPath 互斥。"
           }
         },
         "required": [
           "path"
         ],
         "additionalProperties": false
+      }
+    },
+    {
+      "name": "replace_in_note",
+      "description": "按字面文本在整篇正文、指定章节或块内替换。默认只允许唯一命中，dryRun 可先核对数量。保留 Frontmatter，可用 mtimeMs 防止预览后目标变化。",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "path",
+          "find",
+          "replace"
+        ],
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "既有笔记的精确库内相对路径。"
+          },
+          "vault": {
+            "type": "string",
+            "description": "已登记知识库 ID、名称或路径。"
+          },
+          "heading": {
+            "type": "string",
+            "description": "可选的标题名，与 headingPath 和 blockId 互斥。"
+          },
+          "headingPath": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 6,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "description": "完整标题路径，例如 [\"项目 A\", \"结论\"]。与 heading 和 blockId 互斥。"
+          },
+          "blockId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 129,
+            "description": "Obsidian 块 ID，例如 ^meeting-summary。与 heading 和 headingPath 互斥。"
+          },
+          "find": {
+            "type": "string",
+            "minLength": 1,
+            "description": "要查找的字面文本，区分大小写。"
+          },
+          "replace": {
+            "type": "string",
+            "description": "替换文本。空字符串表示移除匹配文本。"
+          },
+          "replaceAll": {
+            "type": "boolean",
+            "default": false,
+            "description": "仅当确实需要时设为 true，以替换范围内所有匹配。"
+          },
+          "expectedCount": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "可选，写入前要求匹配数量等于此值。"
+          },
+          "dryRun": {
+            "type": "boolean",
+            "default": false,
+            "description": "只返回匹配数量、范围和文件修改时间，不写入。"
+          },
+          "expectedMtimeMs": {
+            "type": "number",
+            "description": "可选，传入读取或预览返回的 mtimeMs；目标已变化时拒绝写入。"
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "maxLength": 128,
+            "description": "可选，同一写入重试时重复使用同一键。"
+          }
+        }
       }
     },
     {
@@ -433,6 +587,116 @@
         "properties": {},
         "additionalProperties": false
       }
+    },
+    {
+      "name": "manage_tags",
+      "description": "按完整标签名列出、添加或移除指定 Markdown 笔记的 Frontmatter 标签。匹配忽略大小写，保留正文与其他属性。",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "path",
+          "operation"
+        ],
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "既有 Markdown 笔记的库内相对路径。"
+          },
+          "vault": {
+            "type": "string",
+            "description": "已登记知识库的 ID、名称或路径。"
+          },
+          "operation": {
+            "type": "string",
+            "enum": [
+              "list",
+              "add",
+              "remove"
+            ],
+            "description": "list 列出标签。add 和 remove 修改标签。"
+          },
+          "tags": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 100,
+            "items": {
+              "type": "string"
+            },
+            "description": "添加或移除时填写完整标签名。可带 #，不会匹配同名标签的子标签。"
+          }
+        }
+      }
+    },
+    {
+      "name": "write_receipt",
+      "description": "仅供工作台调用。按原知识库 ID、工具和请求编号，只读检查一次笔记或日记的写入回执。",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "vault",
+          "method",
+          "idempotencyKey"
+        ],
+        "properties": {
+          "vault": {
+            "type": "string",
+            "description": "写入请求使用的知识库 ID。"
+          },
+          "method": {
+            "type": "string",
+            "enum": [
+              "write_note",
+              "daily_note"
+            ],
+            "description": "原写入请求使用的工具。"
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "description": "原写入请求的编号。"
+          }
+        }
+      }
+    },
+    {
+      "name": "set_vault_write_policy",
+      "description": "仅供工作台调用。经 Cindy 确认后保存已登记知识库的只读状态和写入目录范围。",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "vault",
+          "readOnly",
+          "restrictFolders",
+          "folders"
+        ],
+        "properties": {
+          "vault": {
+            "type": "string",
+            "description": "已登记目标知识库。"
+          },
+          "readOnly": {
+            "type": "boolean",
+            "description": "设为 true 时拒绝目标库写入。"
+          },
+          "restrictFolders": {
+            "type": "boolean",
+            "description": "设为 true 时只允许在 folders 指定的目录下写入。"
+          },
+          "folders": {
+            "type": "array",
+            "maxItems": 32,
+            "items": {
+              "type": "string",
+              "maxLength": 240
+            },
+            "description": "相对于知识库的目录路径，包含其子目录。空列表表示拒绝所有写入。"
+          }
+        }
+      }
     }
   ],
   "mcpApps": {
@@ -509,6 +773,22 @@
           "visibility": [
             "app"
           ]
+        },
+        "list_notes": {
+          "visibility": [
+            "model",
+            "app"
+          ]
+        },
+        "write_receipt": {
+          "visibility": [
+            "app"
+          ]
+        },
+        "set_vault_write_policy": {
+          "visibility": [
+            "app"
+          ]
         }
       }
     },
@@ -523,6 +803,12 @@
         {
           "id": "task-capture",
           "title": "Obsidian 笔记助手",
+          "resourceUri": "ui://obsidian-vault/workbench",
+          "scope": "task"
+        },
+        {
+          "id": "reply-capture",
+          "title": "保存到 Obsidian",
           "resourceUri": "ui://obsidian-vault/workbench",
           "scope": "task"
         }
@@ -551,9 +837,9 @@
         },
         {
           "id": "save-ai-message",
-          "title": "保存到 Obsidian 笔记",
-          "position": "message.menu",
-          "view": "task-capture",
+          "title": "保存到 Obsidian",
+          "position": "message.body",
+          "view": "reply-capture",
           "match": {
             "roles": [
               "assistant"

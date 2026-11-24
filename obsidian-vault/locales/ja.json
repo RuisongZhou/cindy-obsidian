@@ -1,0 +1,87 @@
+{
+  "name": "Obsidian ボールト",
+  "description": "Cindy でローカルの Obsidian ノートを検索・引用し、リンクをたどったり、会話や今日の記録を保存したりできます。",
+  "whenToUse": "Obsidian のノート、ボールト、デイリーノート、内部リンク、バックリンク、タグ、プロパティ、Canvas を検索・閲覧・編集したいときや、会話の内容をノートに保存したいときに使用します。",
+  "tools": {
+    "vault_status": {
+      "description": "登録済みの Obsidian ボールト、選択中のボールトのノート数・リンク数・未完了タスク・最近のノート・日記設定、および Obsidian CLI の状態を確認します。"
+    },
+    "search_notes": {
+      "description": "キーワード、フォルダー、タグ、プロパティでノートを検索し、関連度順のページと本文の一致位置を返します。",
+      "parameters": {
+        "/properties/cursor": {
+          "description": "同じ検索条件とページサイズで nextCursor をそのまま渡します。"
+        },
+        "/properties/maxMatchesPerNote": {
+          "description": "ノートごとの本文一致件数の上限。1～20、既定値は 8。"
+        }
+      }
+    },
+    "read_note": {
+      "description": "ノート全体、見出し、または ^ブロック ID を読み取ります。見出し一覧には完全な見出しパスが含まれます。",
+      "parameters": {
+        "/properties/headingPath": {
+          "description": "完全な見出しパス。heading と blockId とは併用できません。"
+        },
+        "/properties/blockId": {
+          "description": "Obsidian ブロック ID（例 ^summary）。"
+        }
+      }
+    },
+    "write_note": {
+      "description": "ノート、見出し、ブロック、プロパティを編集します。上書きとゴミ箱への移動には確認が必要です。",
+      "parameters": {
+        "/properties/headingPath": {
+          "description": "完全な見出しパス。heading と blockId とは併用できません。"
+        },
+        "/properties/blockId": {
+          "description": "Obsidian ブロック ID（例 ^summary）。"
+        }
+      }
+    },
+    "daily_note": {
+      "description": "Obsidian のデイリーノートを読み取り、設定されたフォルダー・日付形式・テンプレートで作成し、時刻付きの記録またはチェックボックス付きタスクを追記します。"
+    },
+    "graph_links": {
+      "description": "ノートのリンク、埋め込み、バックリンク、リンクされていない言及、2 段階先の関連ノートを調べます。ハブ、孤立ノート、タグの集計も確認できます。"
+    },
+    "canvas_ops": {
+      "description": "Canvas の一覧表示、読み取り、新規作成、ノードとエッジの更新を行います。既存のボード全体を上書きする前に確認します。"
+    },
+    "open_in_obsidian": {
+      "description": "確認済みのボールト内ファイルを、デスクトップ版 Obsidian で開くように要求します。"
+    },
+    "open_workbench": {
+      "description": "Obsidian のワークベンチを開き、ノートとリンクの閲覧、ノートの保存、今日のデイリーノートへの追記を行います。"
+    },
+    "complete_notes": {
+      "description": "入力欄の @ 補完に、ノートへのリンクまたはパスの候補を返します。ワークベンチとホストからのみ利用します。"
+    },
+    "pick_vault_dir": {
+      "description": "システムのフォルダー選択画面を開き、選択したフォルダーを登録して既定のボールトにします。アプリ内で使用します。"
+    },
+    "list_notes": {
+      "description": "登録済みボールト内のファイルとフォルダーを一覧表示します。相対フォルダー、深さ、拡張子を指定できます。"
+    },
+    "replace_in_note": {
+      "description": "本文、見出し、ブロック内の文字列を置換します。既定では一致が一件の場合のみ書き込みます。プレビューで件数を確認できます。",
+      "parameters": {
+        "/properties/headingPath": {
+          "description": "完全な見出しパス。heading と blockId とは併用できません。"
+        },
+        "/properties/blockId": {
+          "description": "Obsidian ブロック ID（例 ^summary）。"
+        }
+      }
+    },
+    "manage_tags": {
+      "description": "Markdown ノートのフロントマターにあるタグを完全一致で一覧表示、追加、削除します。大文字小文字は区別せず、本文と他のプロパティを保持します。"
+    },
+    "write_receipt": {
+      "description": "ワークベンチ専用。ボールトを変更せずに、以前のノートまたはデイリーノートの書き込み結果を確認します。"
+    },
+    "set_vault_write_policy": {
+      "description": "作業台専用。Cindy の確認後、ボールトの読み取り専用設定と書き込み可能フォルダーを保存します。"
+    }
+  }
+}

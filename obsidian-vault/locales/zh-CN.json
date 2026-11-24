@@ -1,5 +1,87 @@
 {
   "name": "Obsidian 知识库",
-  "description": "深度连接本机 Obsidian 知识库：支持 @ 实时搜笔记、双链图谱遍历、按章节非破坏性编辑、日记沉淀与消息一键入库。",
-  "whenToUse": "用户想查询、搜索、阅读、整理、创建或修改 Obsidian 笔记与知识库（Vault）、每日日记（Daily Note）、双链与反向链接、标签属性、Canvas 思维白板，或将对话结论存入第二大脑时找我"
+  "description": "在 Cindy 中搜索和引用本机 Obsidian 笔记，沿双链浏览，把对话保存到知识库，或快速记录今日日记。",
+  "whenToUse": "用户想查询、搜索、阅读、整理、创建或修改 Obsidian 笔记与知识库（Vault）、每日日记（Daily Note）、双链与反向链接、标签属性、Canvas 思维白板，或将对话结论存入第二大脑时找我",
+  "tools": {
+    "vault_status": {
+      "description": "查看本机已登记的 Obsidian 知识库（Vault）列表、当前激活库统计（笔记数、双链数、未完待办、高频 #标签、日记与收件箱目录配置、近期修改笔记）及 Obsidian CLI 在线状态。"
+    },
+    "search_notes": {
+      "description": "搜索笔记，支持关键词、目录、标签和属性过滤，按相关性排序并分页。每条结果可返回正文命中位置。",
+      "parameters": {
+        "/properties/cursor": {
+          "description": "续页时原样传回 nextCursor，查询及每页大小须一致。"
+        },
+        "/properties/maxMatchesPerNote": {
+          "description": "每篇笔记返回的正文命中上限，1–20，默认 8。"
+        }
+      }
+    },
+    "read_note": {
+      "description": "读取整篇 Obsidian 笔记、标题章节或 ^块 ID。headings 返回每个标题的完整路径，可用于定位重名章节。",
+      "parameters": {
+        "/properties/headingPath": {
+          "description": "完整标题路径，例如 [\"项目 A\", \"结论\"]。与 heading 和 blockId 互斥。"
+        },
+        "/properties/blockId": {
+          "description": "Obsidian 块 ID，例如 ^meeting-summary。与 heading 和 headingPath 互斥。"
+        }
+      }
+    },
+    "write_note": {
+      "description": "创建或编辑 Obsidian 笔记，支持正文、标题路径、块 ID 和 Frontmatter。覆盖已有笔记及移入回收站前需要 Cindy 确认。",
+      "parameters": {
+        "/properties/headingPath": {
+          "description": "完整标题路径，例如 [\"项目 A\", \"结论\"]。与 heading 和 blockId 互斥。"
+        },
+        "/properties/blockId": {
+          "description": "Obsidian 块 ID，例如 ^meeting-summary。与 heading 和 headingPath 互斥。"
+        }
+      }
+    },
+    "daily_note": {
+      "description": "读取、自动初始化或向 Obsidian 每日日记（Daily Note，遵循 .obsidian/daily-notes.json 或插件设置中的目录、日期格式与模板）单次原子追加时间戳记录或待办事项。"
+    },
+    "graph_links": {
+      "description": "遍历 Obsidian 知识图谱连接：查询单篇笔记的 [[出链]]/![[嵌入]]、反向链接（Backlinks）、未连接提及（Unlinked Mentions）与二跳关联笔记，或查看全库核心枢纽（hubs）、孤立笔记（orphans）与标签聚合（tags）。"
+    },
+    "canvas_ops": {
+      "description": "列出、读取、新建或增量合并 Obsidian Canvas 思维白板（.canvas 文件）：支持 text/file/link/group 节点并完整保留已有扩展字段；整板覆盖（overwrite）前需经用户弹窗确认。"
+    },
+    "open_in_obsidian": {
+      "description": "经路径安全校验后，在桌面端 Obsidian 应用中唤起并定位打开已存在的笔记或白板（优先使用已启用 CLI，否则使用精确路径 obsidian://open?path=... URI）。"
+    },
+    "open_workbench": {
+      "description": "在聊天或侧栏打开 Obsidian 知识库交互工作台页面（当用户要求打开可视化面板浏览笔记、预览双链、手动编辑入库或查看今日日记面板时调用）。"
+    },
+    "complete_notes": {
+      "description": "仅供输入框 @ 补全与工作台页面调用：实时返回匹配的 Obsidian 笔记双链候选项（重名笔记自动附带路径消歧）。模型日常检索请调用 search_notes 或 open_workbench。"
+    },
+    "pick_vault_dir": {
+      "description": "仅供工作台页面调用：弹出系统文件夹选择器登记并切换默认 Obsidian Vault 目录。模型打开界面请调用 open_workbench。"
+    },
+    "list_notes": {
+      "description": "列出已登记知识库内的子目录和文件。支持相对目录、深度和扩展名过滤，仅扫描目录元数据。"
+    },
+    "replace_in_note": {
+      "description": "按字面文本在整篇正文、指定章节或块内替换。默认只允许唯一命中，dryRun 可先核对数量。保留 Frontmatter，可用 mtimeMs 防止预览后目标变化。",
+      "parameters": {
+        "/properties/headingPath": {
+          "description": "完整标题路径，例如 [\"项目 A\", \"结论\"]。与 heading 和 blockId 互斥。"
+        },
+        "/properties/blockId": {
+          "description": "Obsidian 块 ID，例如 ^meeting-summary。与 heading 和 headingPath 互斥。"
+        }
+      }
+    },
+    "manage_tags": {
+      "description": "按完整标签名列出、添加或移除指定 Markdown 笔记的 Frontmatter 标签。匹配忽略大小写，保留正文与其他属性。"
+    },
+    "write_receipt": {
+      "description": "仅供工作台调用。按原知识库 ID、工具和请求编号，只读检查一次笔记或日记的写入回执。"
+    },
+    "set_vault_write_policy": {
+      "description": "仅供工作台调用。经 Cindy 确认后保存已登记知识库的只读状态和写入目录范围。"
+    }
+  }
 }

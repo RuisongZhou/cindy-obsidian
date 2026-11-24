@@ -1,22 +1,22 @@
-# cindy-obsidian (`obsidian-vault`)
+# Cindy × Obsidian
 
-参考 OpenAI MCP 与 Google Gemini CLI 的第二大脑连接范式，为 [Cindy](https://github.com/makecindy/cindy) 构建的原生本地 **Obsidian 知识库**插件。
+[English](obsidian-vault/README.md) · [简体中文](obsidian-vault/README.zh-CN.md) · [发布说明](RELEASING.md) · [验收记录](ACCEPTANCE.md)
 
-## 目录结构
+在 [Cindy](https://github.com/makecindy/cindy) 中搜索本机 Obsidian 笔记、沿双链查资料，把对话里的结论保存成 Markdown，或顺手写进今日日记。插件直接读写已登记的知识库文件，Obsidian 关闭时也可以使用。
 
-- `obsidian-vault/` — Cindy 插件完整源码目录（可直接用于 `ghost_forge_pack` / `ghost_forge_install`）
-  - `ghost.json` — 插件身份卡与权限最小化清单（`schemaVersion: 3`）
-  - `main.js` — 沙箱电子脑入口（工具编排、目录选择器、覆盖/删除前原生确认框绑定）
-  - `node/worker.cjs` — 按需 Node 工作进程（严格 Vault 边界与防符号链接逃逸、代码块感知章节切片、YAML Frontmatter 原文无损补丁、原子写盘与并发互斥锁、双链图谱与 Canvas 引擎）
-  - `ui/page.html` — 单文件自包含 MCP Apps 交互工作台（浏览双链、消息一键入库、今日日记速记）
-  - `settings.html` / `settings.js` — 插件自定义设置页
-  - `skills/` — 随包斜杠技能（`/obsidian-capture`、`/obsidian-daily`）
-  - `manual/guide/MANUAL.md` — Agent 多工具编排手册
-  - `locales/` — 中英文清单与工具参数本地化
+## 安装与试用
 
-## 打包与本地安装
+1. 在运行 Cindy 的电脑上准备一个 Obsidian 知识库。支持 **Cindy 0.1.143 或更新版本**。使用 Obsidian 桌面端时，支持 **Obsidian 1.15.1 或更新版本**。
+2. 克隆本仓库后，在 Cindy 对话中说「把当前仓库的 `obsidian-vault/` 打包并安装为本地开发插件」，并检查客户端显示的权限。已有 `.cindy` 文件也可从 Cindy 的「插件」页导入。
+3. 打开侧栏的 **Obsidian 知识库**。若列表为空，点击 **添加知识库**，选择存放 Markdown 笔记的文件夹。建议第一次用测试库试写。
+4. 在输入框键入 `@` 选择笔记，再向 Cindy 提问。也可以在 AI 回复的正文视图选择 **保存到 Obsidian**，核对路径和正文后保存。
 
-在 Cindy 对话中对该仓库目录执行：
+从另一台电脑查看远程任务时，可以在该任务里发送「`$obsidian` 打开知识库工作台」。卡片显示知识库所在电脑。保存途中断线时，恢复连接后点 **检查保存结果**，查看原请求的回执。
 
-- 校验并打包：`ghost_forge_pack({ dir: "<仓库绝对路径>/obsidian-vault" })`
-- 本地安装/更新：`ghost_forge_install({ dir: "<仓库绝对路径>/obsidian-vault" })`
+更多操作和故障排查见[插件介绍](obsidian-vault/README.zh-CN.md)。
+
+## 开发
+
+插件源码在 [`obsidian-vault/`](obsidian-vault/)。`ghost.json` 定义宿主入口、工具和权限，`main.js` 调度工具与原生确认，`node/worker.cjs` 读写本地知识库，`ui/page.html` 和 `settings.html` 分别是工作台和设置页。Node 工作进程只使用标准库。
+
+在 Cindy 中可使用 `ghost_forge_pack` 检查并生成安装包，参数 `dir` 传 `obsidian-vault/` 的绝对路径。版本、验收与投稿步骤见[发布说明](RELEASING.md)。

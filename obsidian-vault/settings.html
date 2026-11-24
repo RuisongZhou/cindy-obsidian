@@ -1,61 +1,63 @@
 <!doctype html>
 <html lang="zh-CN">
+<head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
   * { box-sizing: border-box; }
-  body { margin: 0; padding: 12px; font: 13px/1.55 -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif; color: inherit; }
-  .field { margin-bottom: 12px; }
-  .field label { display: block; font-weight: 600; margin-bottom: 4px; font-size: 12.5px; }
-  .hint { font-size: 11.5px; opacity: 0.72; margin-top: 3px; }
-  input, select {
-    width: 100%;
+  body { margin: 0; padding: 12px; font: 13px/1.55 system-ui, sans-serif; color: inherit; }
+  fieldset { border: 0; margin: 0; padding: 0; min-width: 0; }
+  .field { display: block; margin-bottom: 12px; }
+  label { display: block; font-weight: 600; margin-bottom: 4px; }
+  .hint { margin: 4px 0 0; font-size: 12px; opacity: .8; }
+  input, select, button {
     padding: 7px 10px;
     border-radius: 7px;
-    border: 1px solid var(--border-default, rgba(128,128,128,0.3));
-    background: var(--surface, rgba(128,128,128,0.08));
+    border: 1px solid var(--border-default, rgba(128,128,128,.35));
+    background: var(--surface, rgba(128,128,128,.12));
     color: inherit;
     font: inherit;
   }
-  .actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 14px; }
-  button {
-    padding: 7px 14px;
-    border-radius: 7px;
-    border: 1px solid var(--border-default, rgba(128,128,128,0.35));
-    background: var(--surface, rgba(128,128,128,0.12));
-    color: inherit;
-    font: inherit;
-    font-weight: 600;
-    cursor: pointer;
-  }
-  #msg { font-size: 12px; opacity: 0.85; }
+  input, select { width: 100%; }
+  button { font-weight: 600; cursor: pointer; }
+  button:disabled { opacity: .55; cursor: not-allowed; }
+  :focus-visible { outline: 2px solid Highlight; outline-offset: 2px; }
+  .actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+  #msg { margin: 0; overflow-wrap: anywhere; }
 </style>
+</head>
 <body>
-  <div class="field">
-    <label for="defaultVault">默认 Obsidian 知识库（名称或绝对路径）</label>
-    <input id="defaultVault" placeholder="留空则自动使用 Obsidian 最近打开的 Vault">
-    <div class="hint">插件会自动检测本机 obsidian.json 中已注册的知识库；你也可以在工作台右上角点击「切换库」通过系统目录选择器添加。</div>
-  </div>
-  <div class="field">
-    <label for="inboxFolder">默认收件箱目录 (Inbox)</label>
-    <input id="inboxFolder" placeholder="Inbox">
-    <div class="hint">消息一键入库或 /obsidian-capture 未指定目录时默认存入的子文件夹。</div>
-  </div>
-  <div class="field">
-    <label for="dailyFolder">日记目录覆盖（可选）</label>
-    <input id="dailyFolder" placeholder="留空则自动读取 Vault 内 .obsidian/daily-notes.json">
-  </div>
-  <div class="field">
-    <label for="insertStyle">输入框 @ 引用插入格式</label>
-    <select id="insertStyle">
-      <option value="wikilink">Obsidian 双链 [[笔记名]] + 路径（推荐）</option>
-      <option value="path">仅相对路径 [Obsidian: 路径.md]</option>
-    </select>
-  </div>
-  <div class="actions">
-    <button id="save" type="button">保存设置</button>
-    <span id="msg" role="status"></span>
-  </div>
+  <form id="preferences">
+    <fieldset id="fields" disabled>
+      <div class="field">
+        <label for="default_vault" data-en="Default vault">默认知识库</label>
+        <input id="default_vault" maxlength="512" aria-describedby="vault-hint">
+        <p class="hint" id="vault-hint" data-en="Enter a registered vault's name or full path. Leave empty to use the vault Obsidian opened most recently. To register a folder, choose Add vault in the workbench.">填写已登记库的名称或完整路径。留空自动使用 Obsidian 最近打开的知识库。要登记新目录，请在工作台选择「添加知识库」。</p>
+      </div>
+      <div class="field">
+        <label for="inbox_folder" data-en="Inbox folder">收件箱目录</label>
+        <input id="inbox_folder" maxlength="120" placeholder="Inbox" aria-describedby="inbox-hint">
+        <p class="hint" id="inbox-hint" data-en="Folder relative to the vault, for example Inbox or Notes/Inbox.">填写库内相对路径，例如 Inbox 或 Notes/Inbox。</p>
+      </div>
+      <div class="field">
+        <label for="daily_folder" data-en="Daily note folder override">日记目录覆盖</label>
+        <input id="daily_folder" maxlength="240" placeholder="Journal/Daily" aria-describedby="daily-hint">
+        <p class="hint" id="daily-hint" data-en="Leave empty to use the folder set in Obsidian's Daily Notes configuration.">留空使用 Obsidian「日记」配置中的目录。</p>
+      </div>
+      <div class="field">
+        <label for="insert_style" data-en="@ reference format">@ 引用格式</label>
+        <select id="insert_style">
+          <option value="wikilink" data-en="Wikilink and path">双链与路径</option>
+          <option value="path" data-en="Relative path">仅相对路径</option>
+        </select>
+      </div>
+    </fieldset>
+    <div class="actions">
+      <button id="save" type="submit" disabled data-en="Save preferences">保存设置</button>
+      <button id="retry" type="button" hidden data-en="Retry">重试</button>
+      <p id="msg" role="status"></p>
+    </div>
+  </form>
   <script src="/settings.js"></script>
 </body>
 </html>
