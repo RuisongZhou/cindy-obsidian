@@ -123,16 +123,16 @@ test('an interrupted write keeps its claim if the note was committed before the 
   assert.equal((await fs.readFile(notePath, 'utf8')).split(args.content).length - 1, 1);
 });
 
-test('directory enumeration and paginated body matches use the registered vault', async (t) => {
+test('directory enumeration, vault tag stats, and paginated body matches use the registered vault', async (t) => {
   const fixture = await fs.mkdtemp(path.join(os.tmpdir(), 'obsidian-discovery-'));
   t.after(() => fs.rm(fixture, { recursive: true, force: true }));
   const vault = path.join(fixture, 'vault');
   await fs.mkdir(path.join(vault, 'Notes', 'Empty'), { recursive: true });
   await fs.mkdir(path.join(vault, '.obsidian'));
-  const body = '# Heading\r\nİ 🔎 needle needle\r\n' + 'x'.repeat(33000) + '\nlate hit';
+  const body = '# Heading\r\nİ 🔎 needle needle #project/release\r\n' + 'x'.repeat(33000) + '\nlate hit';
   await Promise.all([
-    fs.writeFile(path.join(vault, 'Notes', 'Main.md'), '---\r\ntags: [metadataonly]\r\n---\r\n' + body),
-    fs.writeFile(path.join(vault, 'Notes', 'Other.md'), 'needle'),
+    fs.writeFile(path.join(vault, 'Notes', 'Main.md'), '---\r\ntags: [metadataonly, project]\r\n---\r\n' + body),
+    fs.writeFile(path.join(vault, 'Notes', 'Other.md'), 'needle #project'),
     fs.writeFile(path.join(vault, 'Notes', 'Picture.PNG'), ''),
     fs.writeFile(path.join(vault, '.obsidian', 'Private.md'), 'needle'),
     fs.writeFile(path.join(fixture, 'Outside.md'), 'needle'),
@@ -141,18 +141,28 @@ test('directory enumeration and paginated body matches use the registered vault'
 
   const request = vaultWorker(t, vault);
 
-  const root = await request('list_notes');
+  const root = await request('list_files');
   assert.deepEqual(root.entries, [{ path: 'Notes', name: 'Notes', type: 'directory' }]);
-  const listing = await request('list_notes', { folder: 'Notes', extension: '.PNG' });
+  const listing = await request('list_files', { folder: 'Notes', extension: '.PNG' });
   assert.deepEqual(listing.entries.map(({ path, type }) => [path, type]), [
     ['Notes/Empty', 'directory'], ['Notes/Picture.PNG', 'file'],
   ]);
-  assert.deepEqual((await request('list_notes', { depth: 2, extension: 'md' })).entries.map((entry) => entry.path),
+  assert.deepEqual((await request('list_files', { depth: 2, extension: 'md' })).entries.map((entry) => entry.path),
     ['Notes', 'Notes/Empty', 'Notes/Main.md', 'Notes/Other.md']);
-  assert.equal(await request('list_notes', { folder: '../' }), 'INVALID_FOLDER');
-  assert.equal(await request('list_notes', { folder: vault }), 'INVALID_FOLDER');
-  assert.equal(await request('list_notes', { folder: 'Outside' }), 'FOLDER_NOT_FOUND');
-  assert.equal(await request('list_notes', { folder: '.obsidian' }), 'INVALID_FOLDER');
+  assert.equal(await request('list_files', { folder: '../' }), 'INVALID_FOLDER');
+  assert.equal(await request('list_files', { folder: vault }), 'INVALID_FOLDER');
+  assert.equal(await request('list_files', { folder: 'Outside' }), 'FOLDER_NOT_FOUND');
+  assert.equal(await request('list_files', { folder: '.obsidian' }), 'INVALID_FOLDER');
+
+  const allTags = await request('list_tags');
+  assert.equal(allTags.totalTags, 3);
+  assert.equal(allTags.tags[0].tag, 'project');
+  assert.equal(allTags.tags[0].count, 2);
+  const prefixed = await request('list_tags', { prefix: '#project', limit: 1 });
+  assert.equal(prefixed.totalTags, 2);
+  assert.equal(prefixed.truncated, true);
+  assert.equal(prefixed.tags.length, 1);
+  assert.equal(await request('graph_links', { mode: 'tags' }), 'USE_LIST_TAGS');
 
   const options = { query: 'needle', limit: 1, maxMatchesPerNote: 1 };
   const first = await request('search_notes', options);
@@ -213,6 +223,12 @@ test('precise writes keep scope, block IDs, BOM, and unrelated Markdown intact',
   assert.equal(await read({ blockId: '^quote-fake' }), 'BLOCK_NOT_FOUND');
   assert.equal(await read({ headingPath: ['Beta', 'Summary'], blockId: 'task' }), 'AMBIGUOUS_NOTE_SCOPE');
   assert.equal(await write('replace-section', { headingPath: ['Missing', 'Summary'] }, 'wrong'), 'HEADING_NOT_FOUND');
+  assert.equal(await request('write_note', { path: 'Plan.md', mode: 'delete' }), 'USE_DELETE_NOTE');
+  assert.equal(await request('write_note', { path: 'Plan.md', mode: 'replace-text', find: 'old', replace: 'new' }), 'INVALID_WRITE_MODE');
+  assert.equal(await request('write_note', { path: 'Plan.md', mode: 'manage-tags', operation: 'list' }), 'INVALID_WRITE_MODE');
+  assert.equal(await request('write_note', { path: 'Plan.md', mode: 'append', content: 'x', tags: ['a'] }), 'USE_MANAGE_TAGS');
+  assert.equal(await request('write_note', { path: 'Plan.md', mode: 'update-frontmatter', frontmatter: { tags: ['a'] } }), 'USE_MANAGE_TAGS');
+
   const preview = await replace({ dryRun: true });
   assert.equal(preview.matchCount, 5);
   assert.equal(await replace({}), 'REPLACEMENT_COUNT_MISMATCH');
@@ -236,6 +252,15 @@ test('precise writes keep scope, block IDs, BOM, and unrelated Markdown intact',
   const final = await onDisk();
   assert.match(final, /^\uFEFF---\r\ntags: \[old\]\r\n---\r\n\r\n/);
   assert.match(final, /# Beta\r\n## Summary\r\n\r\nrevised/);
+
+  const created = await request('write_note', {
+    path: 'Fresh.md',
+    mode: 'create',
+    content: '# Fresh',
+    frontmatter: { tags: ['#Alpha', 'alpha', 'Beta/Sub'] },
+  });
+  assert.deepEqual(created.frontmatter.tags, ['Alpha', 'Beta/Sub']);
+
   await fs.writeFile(path.join(vault, 'Duplicate.md'), 'first ^dupe\n\nsecond ^dupe\n');
   assert.equal(await request('read_note', { path: 'Duplicate.md', blockId: 'dupe' }), 'AMBIGUOUS_BLOCK');
   const batch = { path: 'Duplicate.md', find: 'dupe', replace: 'fixture', replaceAll: true };
@@ -243,7 +268,7 @@ test('precise writes keep scope, block IDs, BOM, and unrelated Markdown intact',
   assert.equal((await request('replace_in_note', { ...batch, expectedCount: 2 })).matchCount, 2);
 });
 
-test('write rules cover note, daily, Canvas, trash and tag operations', async (t) => {
+test('write rules cover note, delete_note, daily, Canvas, and tag operations', async (t) => {
   const top = await fs.mkdtemp(path.join(os.tmpdir(), 'obsidian-policy-'));
   t.after(() => fs.rm(top, { recursive: true, force: true }));
   const vault = await fs.realpath(top);
@@ -265,7 +290,7 @@ test('write rules cover note, daily, Canvas, trash and tag operations', async (t
   const restricted = configuration({ readOnly: false, writeFolders: ['Inbox'] });
   const denied = [
     ['write_note', { path: 'Inbox/Tagged.md', mode: 'append', content: 'unexpected' }],
-    ['write_note', { path: 'Inbox/Tagged.md', mode: 'delete' }],
+    ['delete_note', { path: 'Inbox/Tagged.md' }],
     ['inspect_write_target', { path: 'Inbox/Tagged.md' }],
     ['replace_in_note', { path: 'Inbox/Tagged.md', find: 'Keep', replace: 'Change' }],
     ['manage_tags', { path: 'Inbox/Tagged.md', operation: 'add', tags: ['new'] }],
@@ -275,14 +300,16 @@ test('write rules cover note, daily, Canvas, trash and tag operations', async (t
   for (const [method, args] of denied) {
     assert.equal(await request(method, { ...args, settings: readonly }), 'VAULT_READ_ONLY', method);
   }
-  assert.equal(await request('write_note', { vault: inbox, path: 'Tagged.md', mode: 'delete', settings: readonly }), 'VAULT_READ_ONLY');
-  assert.equal(await request('write_note', { path: 'Outside.md', mode: 'delete', settings: restricted }), 'WRITE_OUTSIDE_ALLOWED_FOLDERS');
+  assert.equal(await request('delete_note', { vault: inbox, path: 'Tagged.md', settings: readonly }), 'VAULT_READ_ONLY');
+  assert.equal(await request('delete_note', { path: 'Outside.md', settings: restricted }), 'WRITE_OUTSIDE_ALLOWED_FOLDERS');
   assert.equal(await request('write_note', { path: 'Inbox-Other/Blocked.md', mode: 'create', settings: restricted }), 'WRITE_OUTSIDE_ALLOWED_FOLDERS');
   assert.equal(await request('daily_note', { action: 'ensure', date: '2026-11-23', settings: restricted }), 'WRITE_OUTSIDE_ALLOWED_FOLDERS');
+  assert.equal(await request('canvas_ops', { action: 'write', path: 'Inbox/Board.canvas', nodes: [], settings: restricted }), 'INVALID_CANVAS_ACTION');
   assert.equal(await request('inspect_vault_write_policy', { policy: { readOnly: false, writeFolders: ['../'] } }), 'INVALID_FOLDER');
   assert.deepEqual((await request('vault_status', { settings: restricted })).writePolicy, { readOnly: false, writeFolders: ['Inbox'] });
   assert.equal((await request('replace_in_note', { path: 'Inbox/Tagged.md', find: 'Keep', replace: 'Change', dryRun: true, settings: readonly })).matchCount, 1);
   assert.equal((await request('daily_note', { action: 'read', date: '2026-11-23', settings: readonly })).exists, false);
+
   const tags = (operation, values, settings = restricted) =>
     request('manage_tags', { path: 'Inbox/Tagged.md', operation, tags: values, settings });
   assert.deepEqual((await tags('list', undefined, readonly)).tags, ['Alpha', 'alpha/Child', 'Exact']);
@@ -295,12 +322,17 @@ test('write rules cover note, daily, Canvas, trash and tag operations', async (t
   assert.deepEqual((await tags('remove', ['alpha'])).skipped, ['alpha']);
   assert.equal(await fs.readFile(target, 'utf8'), disk);
   assert.equal(await request('manage_tags', { path: 'Inbox/Unsafe.md', operation: 'remove', tags: ['Alpha'], settings: restricted }), 'UNSUPPORTED_TAGS_PROPERTY');
-  assert.equal(await fs.readFile(path.join(inbox,'Unsafe.md'), 'utf8'), '---\ntags: Alpha #note\n---\nbody');
+  assert.equal(await fs.readFile(path.join(inbox, 'Unsafe.md'), 'utf8'), '---\ntags: Alpha #note\n---\nbody');
   assert.equal((await request('write_note', { path: 'Inbox/New/Allowed.md', mode: 'create', content: 'allowed', settings: restricted })).action, 'created');
   assert.equal((await request('canvas_ops', { path: 'Inbox/Board.canvas', action: 'create', nodes: [], settings: restricted })).action, 'created');
+
+  const trashed = await request('delete_note', { path: 'Inbox/New/Allowed.md', idempotencyKey: 'del-once', settings: restricted });
+  assert.equal(trashed.action, 'moved_to_obsidian_trash');
+  assert.match(trashed.trashFile, /^\.trash\/Inbox__New__Allowed\./);
+  assert.deepEqual(await request('delete_note', { path: 'Inbox/New/Allowed.md', idempotencyKey: 'del-once', settings: restricted }), trashed);
 });
 
-test('the host confirms rule changes and fetches fresh rules before writes', async () => {
+test('the host confirms rule changes and delete_note, and fetches fresh rules before writes', async () => {
   const vm = require('node:vm');
   const main = await fs.readFile(path.join(__dirname, '../obsidian-vault/main.js'), 'utf8');
   const vault = { id: 'test', name: 'Test vault', path: '/fixtures/test-vault' };
@@ -319,6 +351,8 @@ test('the host confirms rule changes and fetches fresh rules before writes', asy
         async request({ method, params }) {
           dispatched.push({ method, params });
           if (method === 'inspect_vault_write_policy') return { ok: true, result: { vault, policy: params.policy } };
+          if (method === 'inspect_write_target') return { ok: true, result: { vault, path: params.path, exists: true, mtimeMs: 12345 } };
+          if (method === 'delete_note') return { ok: true, result: { action: 'moved_to_obsidian_trash', vault, path: params.path, trashFile: '.trash/Note.md' } };
           return { ok: false, message: 'Policy checked by worker.' };
         },
       },
@@ -339,6 +373,14 @@ test('the host confirms rule changes and fetches fresh rules before writes', asy
   await invoke('set_vault_write_policy', proposed);
   assert.deepEqual(settings.vault_write_policies[vault.path], { readOnly: true, writeFolders: ['Inbox'] });
   assert.equal(settings.inbox_folder, 'Inbox');
+
+  confirmed = false;
+  await invoke('delete_note', { vault: vault.id, path: 'Note.md' });
+  assert.equal(results.at(-1).result.structuredContent.errorCode, 'CONFIRMATION_DECLINED');
+  confirmed = true;
+  await invoke('delete_note', { vault: vault.id, path: 'Note.md' });
+  assert.equal(results.at(-1).result.structuredContent.action, 'moved_to_obsidian_trash');
+
   settings = { ...settings, vault_write_policies: { [vault.path]: { readOnly: false, writeFolders: [] } } };
   await invoke('write_note', { path: 'Blocked.md', content: 'fixture' });
   assert.deepEqual(dispatched.at(-1).params.settings.vault_write_policies[vault.path], { readOnly: false, writeFolders: [] });
@@ -347,4 +389,337 @@ test('the host confirms rule changes and fetches fresh rules before writes', asy
   await invoke('write_note', { path: 'Blocked.md', content: 'fixture' });
   assert.equal(dispatched.length, callsBeforeFailure);
   assert.equal(results.at(-1).result.isError, true);
+});
+
+test('manifest tools, visibility declarations, and all locale files stay strictly aligned', async () => {
+  const root = path.join(__dirname, '../obsidian-vault');
+  const manifest = JSON.parse(await fs.readFile(path.join(root, 'ghost.json'), 'utf8'));
+  assert.equal(manifest.version, '1.1.4');
+  assert.ok(manifest.description.length > 0 && manifest.description.length <= 300);
+  assert.ok(manifest.whenToUse.length > 0 && manifest.whenToUse.length <= 300);
+
+  const toolMap = new Map(manifest.tools.map((tool) => [tool.name, tool]));
+  const uiToolNames = Object.keys(manifest.mcpApps.ui.tools);
+  assert.deepEqual([...toolMap.keys()].sort(), [...uiToolNames].sort());
+
+  for (const tool of manifest.tools) {
+    assert.ok(Buffer.byteLength(JSON.stringify(tool.parameters), 'utf8') <= 16384, tool.name);
+  }
+
+  for (const [locale, relFile] of Object.entries(manifest.locales)) {
+    const raw = await fs.readFile(path.join(root, relFile), 'utf8');
+    assert.ok(Buffer.byteLength(raw, 'utf8') <= 65536, locale);
+    const data = JSON.parse(raw);
+    assert.ok(data.description.length > 0 && data.description.length <= 300, locale + ' description');
+    assert.ok(data.whenToUse.length > 0 && data.whenToUse.length <= 300, locale + ' whenToUse');
+    assert.deepEqual(Object.keys(data.tools).sort(), [...toolMap.keys()].sort(), locale + ' tool keys');
+    for (const [toolName, locTool] of Object.entries(data.tools)) {
+      const schemaProps = toolMap.get(toolName).parameters.properties || {};
+      for (const pointer of Object.keys(locTool.parameters || {})) {
+        const match = /^\/properties\/([^/]+)$/.exec(pointer);
+        assert.ok(match && Object.hasOwn(schemaProps, match[1]), `${locale}:${toolName} invalid pointer ${pointer}`);
+      }
+    }
+  }
+});
+
+test('partner folders take default destinations only, and reply capture never duplicates', async (t) => {
+  const fixture = await fs.mkdtemp(path.join(os.tmpdir(), 'obsidian-partner-'));
+  t.after(() => fs.rm(fixture, { recursive: true, force: true }));
+  const vault = path.join(fixture, 'vault');
+  await fs.mkdir(path.join(vault, 'Projects'), { recursive: true });
+  const request = vaultWorker(t, vault);
+  const partner = { id: 'bot-1', name: '小助手', folder: '伙伴/小助手' };
+
+  const status = await request('vault_status', { _companion: partner });
+  assert.equal(status.summary.defaultFolder, '伙伴/小助手');
+  assert.equal((await request('vault_status')).summary.defaultFolder, 'Inbox');
+
+  const bare = await request('write_note', { path: '周报', content: 'a', _companion: partner });
+  assert.equal(bare.path, '伙伴/小助手/周报.md');
+  assert.equal(bare.redirectedFrom, '周报.md');
+  const inbox = await request('write_note', { path: 'Inbox/Sub/想法.md', content: 'b', _companion: partner });
+  assert.equal(inbox.path, '伙伴/小助手/Sub/想法.md');
+  const explicit = await request('write_note', { path: 'Projects/计划.md', content: 'c', _companion: partner });
+  assert.equal(explicit.path, 'Projects/计划.md');
+  assert.equal(explicit.redirectedFrom, undefined);
+  const inside = await request('write_note', { path: '伙伴/小助手/已在.md', content: 'd', _companion: partner });
+  assert.equal(inside.path, '伙伴/小助手/已在.md');
+  const appended = await request('write_note', { path: 'Root.md', mode: 'append', content: 'e', _companion: partner });
+  assert.equal(appended.path, 'Root.md');
+  const broken = await request('write_note', { path: 'Loose.md', content: 'f', _companion: { ...partner, folder: '../out' } });
+  assert.equal(broken.path, 'Loose.md');
+  assert.match(broken.companionFolderWarning, /无效/);
+
+  const reply = '# 会议结论\n\n- 第一条\n';
+  const first = await request('capture_note', { folder: partner.folder, content: reply, idempotencyKey: 'reply-1', frontmatter: { source: 'Cindy' } });
+  assert.equal(first.path, '伙伴/小助手/会议结论.md');
+  const again = await request('capture_note', { folder: partner.folder, content: reply, idempotencyKey: 'reply-1', frontmatter: { source: 'Cindy' } });
+  assert.equal(again.path, first.path);
+  assert.equal(again.replayed, true);
+  const second = await request('capture_note', { folder: partner.folder, content: reply, idempotencyKey: 'reply-2' });
+  assert.equal(second.path, '伙伴/小助手/会议结论 2.md');
+  const saved = await fs.readFile(path.join(vault, first.path), 'utf8');
+  assert.match(saved, /^---\nsource: Cindy\n---\n# 会议结论/);
+  assert.equal(await request('capture_note', { folder: 'Inbox', content: '   ' }), 'EMPTY_CONTENT');
+  assert.equal(await request('check_folder', { folder: '../x' }), 'INVALID_FOLDER');
+  assert.deepEqual(await request('check_folder', { folder: '伙伴/新目录/' }), { folder: '伙伴/新目录' });
+
+  const outside = path.join(fixture, 'AI 报告.md');
+  await fs.writeFile(outside, '---\ntitle: x\n---\n报告正文\n');
+  const info = await request('inspect_markdown_file', { file: outside });
+  assert.equal(info.insideVault, null);
+  assert.equal(info.stem, 'AI 报告');
+  const imported = await request('import_markdown_file', { file: outside, folder: 'Inbox', name: 'AI 报告', idempotencyKey: 'file-1' });
+  assert.equal(imported.path, 'Inbox/AI 报告.md');
+  assert.equal(await fs.readFile(path.join(vault, imported.path), 'utf8'), '---\ntitle: x\n---\n报告正文\n');
+  assert.equal(await fs.readFile(outside, 'utf8'), '---\ntitle: x\n---\n报告正文\n');
+  const own = await request('inspect_markdown_file', { file: path.join(vault, imported.path) });
+  assert.equal(own.insideVault.name, 'vault');
+  assert.equal(await request('import_markdown_file', { file: path.join(vault, imported.path), folder: 'Inbox' }), 'ALREADY_IN_VAULT');
+  assert.equal(await request('inspect_markdown_file', { file: path.join(fixture, 'missing.md') }), 'NOT_REGULAR_FILE');
+  assert.equal(await request('inspect_markdown_file', { file: 'relative.md' }), 'INVALID_PATH');
+});
+
+test('the host-resolved partner sets default folders, and .md opens offer an import', async () => {
+  const vm = require('node:vm');
+  const main = await fs.readFile(path.join(__dirname, '../obsidian-vault/main.js'), 'utf8');
+  let settings = { inbox_folder: 'Inbox' };
+  let listener;
+  const dispatched = [];
+  const results = [];
+  const sent = [];
+  const forms = [];
+  let formAnswer = { ok: true, outcome: 'cancel' };
+  const confirms = [];
+  let confirmAnswers = [];
+  const bots = { 'session-bot': { kind: 'bot', id: 'bot-1', label: '小助手' }, 'session-task': { kind: 'task', id: 'session-task', label: '普通任务' } };
+  vm.runInNewContext(main, {
+    setTimeout: (fn) => setTimeout(fn, 0),
+    crypto: { randomUUID: () => '00000000-0000-4000-8000-000000000000' },
+    cindy: {
+      onHostMessage: (handler) => { listener = handler; },
+      confirm: async (spec) => { confirms.push(spec); return confirmAnswers.shift() || { ok: true, confirmed: false }; },
+      form: async (spec) => { forms.push(spec); return formAnswer; },
+      send: async (message) => (message.type === 'tool-result' ? results : sent).push(message),
+      targets: {
+        resolve: async ({ session, target }) => {
+          if (target) return { kind: 'bot', id: target.id, label: '小助手' };
+          if (!bots[session]) throw Object.assign(new Error('gone'), { code: 'TARGET_UNAVAILABLE' });
+          return bots[session];
+        },
+        list: async () => ({ targets: [{ kind: 'bot', id: 'bot-1', label: '小助手' }, { kind: 'bot', id: 'bot-2', label: 'Writer' }] }),
+      },
+      node: {
+        async request({ method, params }) {
+          dispatched.push({ method, params });
+          if (method === 'check_folder') return { ok: true, result: { folder: params.folder.replace(/\/+$/, '') } };
+          if (method === 'inspect_markdown_file') {
+            return { ok: true, result: { name: 'r.md', stem: 'r', insideVault: params.file.startsWith('/vault/') ? { id: 'v' } : null, vaults: [{ id: 'v', name: 'Vault' }], defaultVault: 'v', inboxFolder: 'Inbox' } };
+          }
+          if (method === 'import_markdown_file') return { ok: true, result: { vault: { id: 'v', name: 'Vault' }, path: params.folder + '/r.md' } };
+          return { ok: true, result: { vault: { id: 'v', name: 'Vault' }, path: params.path || 'x.md', action: 'created' } };
+        },
+      },
+    },
+    fetch: async (endpoint, options) => {
+      if (options?.method === 'PUT') settings = JSON.parse(options.body);
+      return { ok: true, json: async () => settings };
+    },
+  });
+  const invoke = (tool, args) => listener({ type: 'tool-call', tool, args, callId: 'fixture' });
+  const plain = (value) => JSON.parse(JSON.stringify(value));
+  const lastCall = (method) => dispatched.filter((call) => call.method === method).at(-1);
+
+  await invoke('write_note', { path: 'a.md', content: 'x', session_context: { session_id: 'session-bot' }, _companion: { id: 'forged', folder: 'Elsewhere' } });
+  assert.deepEqual(plain(lastCall('write_note').params._companion), { id: 'bot-1', name: '小助手', folder: '伙伴/小助手' });
+  assert.equal(lastCall('write_note').params.session_context, undefined);
+  await invoke('write_note', { path: 'b.md', content: 'x', _companion: { id: 'forged', folder: 'Elsewhere' } });
+  assert.equal(lastCall('write_note').params._companion, undefined);
+  await invoke('write_note', { path: 'c.md', content: 'x', session_context: { session_id: 'session-task' } });
+  assert.equal(lastCall('write_note').params._companion, undefined);
+  await invoke('write_note', { path: 'd.md', mode: 'append', content: 'x', session_context: { session_id: 'session-bot' } });
+  assert.equal(lastCall('write_note').params._companion, undefined);
+
+  await invoke('set_companion_folder', { companionId: 'bot-1', folder: 'Agents/Helper/' });
+  assert.deepEqual(settings.companion_folders['bot-1'], { folder: 'Agents/Helper', name: '小助手' });
+  await invoke('vault_status', { session_context: { session_id: 'session-bot' } });
+  assert.equal(lastCall('vault_status').params._companion.folder, 'Agents/Helper');
+  await invoke('companion_folders', { sessionId: 'session-bot' });
+  const listed = results.at(-1).result.structuredContent;
+  assert.deepEqual(plain(listed.companions.map((item) => [item.name, item.folder, item.custom])), [['小助手', 'Agents/Helper', true], ['Writer', '伙伴/Writer', false]]);
+  assert.equal(listed.current.folder, 'Agents/Helper');
+  await invoke('set_companion_folder', { companionId: 'bot-1', folder: '' });
+  assert.equal(settings.companion_folders['bot-1'], undefined);
+
+  await invoke('capture_reply', { content: '# Hi', sessionId: 'session-bot', idempotencyKey: 'reply-x' });
+  assert.equal(lastCall('capture_note').params.folder, '伙伴/小助手');
+  assert.equal(lastCall('capture_note').params.frontmatter.companion, '小助手');
+  await invoke('capture_reply', { content: '# Hi', sessionId: 'session-task', idempotencyKey: 'reply-y' });
+  assert.equal(lastCall('capture_note').params.folder, 'Inbox');
+  settings = { ...settings, companion_folder_root: '' };
+  await invoke('capture_reply', { content: '# Hi', sessionId: 'session-bot', idempotencyKey: 'reply-z' });
+  assert.equal(lastCall('capture_note').params.folder, 'Inbox');
+  settings = { inbox_folder: 'Inbox' };
+
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 20));
+  const open = async (file, requestId) => {
+    await listener({ type: 'event', name: 'open-file', requestId, deadline: Date.now() + 15000, data: { path: file } });
+    await settle();
+  };
+  await open('/vault/in.md', 'r1');
+  assert.deepEqual(plain(sent.at(-1)), { type: 'file-open-result', requestId: 'r1', ok: false });
+  formAnswer = { ok: true, outcome: 'submit', values: { vault: 'v', folder: '伙伴/Writer', customFolder: '', name: 'r' } };
+  confirmAnswers = [{ ok: false, errorCode: 'BUSY' }, { ok: true, confirmed: true }];
+  await open('/tmp/r.md', 'r2');
+  assert.equal(confirms.length, 2);
+  assert.ok(confirms.every((spec) => spec.confirmText.length <= 12 && spec.cancelText.length <= 12));
+  assert.match(confirms[1].body, /伙伴\/Writer\/r\.md/);
+  assert.equal(lastCall('open_in_obsidian').params.path, '伙伴/Writer/r.md');
+  assert.deepEqual(plain(sent.at(-1)), { type: 'file-open-result', requestId: 'r2', ok: true });
+  assert.deepEqual(plain(forms.at(-1).fields.find((field) => field.key === 'folder').options.map((option) => option.value)), ['Inbox', '伙伴/小助手', '伙伴/Writer']);
+  assert.equal(lastCall('import_markdown_file').params.folder, '伙伴/Writer');
+  formAnswer = { ok: true, outcome: 'action', action: 'open' };
+  await open('/tmp/r.md', 'r3');
+  assert.equal(lastCall('open_with_default_app').params.file, '/tmp/r.md');
+  settings = { ...settings, md_open_prompt: false };
+  const before = forms.length;
+  await open('/tmp/r.md', 'r4');
+  assert.deepEqual(plain(sent.at(-1)), { type: 'file-open-result', requestId: 'r4', ok: false });
+  assert.equal(forms.length, before);
+});
+
+// Stands in for the official Obsidian CLI: answers from `responses`, records every call in `log`.
+async function fakeObsidianCli(fixture, { vaultPath, responses }) {
+  const preload = path.join(fixture, 'fake-obsidian-cli.cjs');
+  const log = path.join(fixture, 'cli-calls.jsonl');
+  await fs.writeFile(preload, `
+    const fs = require('node:fs');
+    const childProcess = require('node:child_process');
+    const responses = ${JSON.stringify(responses)};
+    const vaultPath = ${JSON.stringify(vaultPath)};
+    const isCli = (file) => /(obsidian-cli|Obsidian\\.com|[\\\\/]obsidian)$/.test(String(file));
+    const existsSync = fs.existsSync;
+    const statSync = fs.statSync;
+    fs.existsSync = (file) => isCli(file) || existsSync(file);
+    fs.statSync = (file, ...rest) => (isCli(file) ? { isFile: () => true } : statSync(file, ...rest));
+    childProcess.execFile = (file, args, options, callback) => {
+      if (typeof options === 'function') { callback = options; options = {}; }
+      let out = '';
+      if (file === 'pgrep' || file === 'tasklist') out = '4242 Obsidian.exe\\n';
+      else if (isCli(file)) {
+        fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify(args) + '\\n');
+        const command = args[0] && args[0].startsWith('vault=') ? args[1] : args[0];
+        if (command === 'vault') out = responses.vault ?? vaultPath;
+        else out = responses[command] ?? 'Error: Command "' + command + '" not found.';
+      }
+      process.nextTick(() => callback(null, out + '\\n', ''));
+      return { on() {}, kill() {} };
+    };
+  `);
+  return {
+    preload,
+    async calls() {
+      const text = await fs.readFile(log, 'utf8').catch(() => '');
+      return text.split('\n').filter(Boolean).map((line) => JSON.parse(line));
+    },
+  };
+}
+
+async function registeredVaultFixture(prefix) {
+  const fixture = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
+  const vault = path.join(fixture, 'vault');
+  const home = path.join(fixture, 'home');
+  await fs.mkdir(vault);
+  const configDir = process.platform === 'darwin'
+    ? path.join(home, 'Library', 'Application Support', 'obsidian')
+    : path.join(process.env.XDG_CONFIG_HOME || path.join(home, '.config'), 'obsidian');
+  await fs.mkdir(configDir, { recursive: true });
+  const real = await fs.realpath(vault);
+  await fs.writeFile(path.join(configDir, 'obsidian.json'), JSON.stringify({
+    vaults: { abc123: { path: real, ts: 1, open: true } },
+  }));
+  return { fixture, vault: real, home };
+}
+
+const skipCliTests = process.platform === 'win32' || (process.platform !== 'darwin' && process.env.XDG_CONFIG_HOME)
+  ? 'needs a private Obsidian config directory'
+  : false;
+
+test('link, tag and daily queries use the Obsidian CLI and never send it writes', { skip: skipCliTests }, async (t) => {
+  const { fixture, vault, home } = await registeredVaultFixture('obsidian-cli-queries-');
+  t.after(() => fs.rm(fixture, { recursive: true, force: true }));
+  await fs.mkdir(path.join(vault, 'Journal'));
+  await fs.writeFile(path.join(vault, 'Hub.md'), 'see [[Spoke]] and [[Ghost]] #topic\n');
+  await fs.writeFile(path.join(vault, 'Spoke.md'), 'plain text, no links #topic/sub\n');
+  await fs.writeFile(path.join(vault, 'Journal', 'Today in Obsidian.md'), '# today\n');
+  const cli = await fakeObsidianCli(fixture, {
+    vaultPath: vault,
+    responses: {
+      version: '1.15.1 (installer 1.15.1)',
+      backlinks: JSON.stringify([{ file: 'Spoke.md' }]),
+      links: 'Spoke.md\nGhost (unresolved)',
+      tags: JSON.stringify([{ tag: '#topic', count: '7' }, { tag: '#topic/sub', count: '3' }, { tag: '#other', count: '1' }]),
+      'daily:path': 'Journal/Today in Obsidian.md',
+    },
+  });
+  const request = vaultWorker(t, vault, { home, preload: cli.preload });
+
+  const graph = await request('graph_links', { vault: 'abc123', path: 'Hub.md' });
+  assert.equal(graph.linkSource, 'obsidian-cli');
+  assert.deepEqual(graph.backlinks.map((b) => b.path), ['Spoke.md']);
+  assert.deepEqual(graph.outlinks.map((o) => [o.target, o.exists, o.resolvedPath]), [['Spoke', true, 'Spoke.md'], ['Ghost', false, null]]);
+
+  const tags = await request('list_tags', { vault: 'abc123', prefix: 'topic' });
+  assert.equal(tags.tagSource, 'obsidian-cli');
+  assert.deepEqual(tags.tags.map((x) => [x.tag, x.count]), [['topic', 7], ['topic/sub', 3]]);
+  assert.deepEqual(tags.tags[0].sampleNotes, ['Hub.md']);
+
+  const today = await request('daily_note', { vault: 'abc123', action: 'read' });
+  assert.equal(today.pathSource, 'obsidian-cli');
+  assert.equal(today.path, 'Journal/Today in Obsidian.md');
+  const pastDay = await request('daily_note', { vault: 'abc123', action: 'read', date: '2020-01-02' });
+  assert.equal(pastDay.pathSource, 'daily-notes-config');
+  assert.equal(pastDay.path, '2020-01-02.md');
+  const overridden = await request('daily_note', { vault: 'abc123', action: 'read', settings: { daily_format: 'YYYY-MM-DD' } });
+  assert.equal(overridden.pathSource, 'daily-notes-config');
+
+  await request('daily_note', { vault: 'abc123', action: 'append', content: 'C:\\temp\\new and $\\theta$' });
+  const written = await fs.readFile(path.join(vault, 'Journal', 'Today in Obsidian.md'), 'utf8');
+  assert.match(written, /C:\\temp\\new and \$\\theta\$/);
+
+  const commands = (await cli.calls()).map((args) => args.find((a) => !a.startsWith('vault=')));
+  assert.ok(commands.every((c) => ['version', 'vault', 'backlinks', 'links', 'tags', 'daily:path'].includes(c)), commands.join(','));
+  assert.ok((await cli.calls()).every((args) => args[0] === 'version' || args[0] === 'vault=abc123'));
+});
+
+test('CLI problems fall back to the local index', { skip: skipCliTests }, async (t) => {
+  for (const [label, responses, reason] of [
+    ['disabled', { version: 'Command line interface is not enabled. Please turn it on in Settings > General > Advanced.' }, 'CLI_UNAVAILABLE'],
+    ['other vault', { version: '1.15.1', vault: '/somewhere/else' }, 'CLI_VAULT_MISMATCH'],
+    ['error text', { version: '1.15.1', backlinks: 'Error: File "Hub.md" not found.' }, 'CLI_COMMAND_ERROR'],
+    ['not json', { version: '1.15.1', backlinks: 'Hub.md', links: 'No links found.' }, 'CLI_UNEXPECTED_OUTPUT'],
+  ]) {
+    const { fixture, vault, home } = await registeredVaultFixture('obsidian-cli-fallback-');
+    t.after(() => fs.rm(fixture, { recursive: true, force: true }));
+    await fs.writeFile(path.join(vault, 'Hub.md'), 'see [[Spoke]]\n');
+    await fs.writeFile(path.join(vault, 'Spoke.md'), 'back to [[Hub]]\n');
+    const cli = await fakeObsidianCli(fixture, { vaultPath: vault, responses });
+    const request = vaultWorker(t, vault, { home, preload: cli.preload });
+    const graph = await request('graph_links', { vault: 'abc123', path: 'Hub.md' });
+    assert.equal(graph.linkSource, 'filesystem', label);
+    assert.equal(graph.cliFallbackReason, reason, label);
+    assert.deepEqual(graph.backlinks.map((b) => b.path), ['Spoke.md'], label);
+  }
+});
+
+test('the CLI adapter refuses values the CLI would rewrite', () => {
+  const { _internal } = require('../obsidian-vault/node/obsidian-cli.cjs');
+  assert.throws(() => _internal.assertSafeValue('Notes\\new.md'), { code: 'CLI_UNSAFE_ARGUMENT' });
+  assert.throws(() => _internal.assertSafeValue('a\tb'), { code: 'CLI_UNSAFE_ARGUMENT' });
+  assert.equal(_internal.assertSafeValue('笔记/a b.md'), '笔记/a b.md');
+  assert.throws(() => _internal.parseOutput('Vault not found.'), { code: 'CLI_COMMAND_ERROR' });
+  assert.deepEqual(_internal.parseJsonList('No backlinks found.'), []);
+  assert.equal(_internal.ALLOWED_COMMANDS.has('create'), false);
+  assert.equal(_internal.ALLOWED_COMMANDS.has('eval'), false);
 });

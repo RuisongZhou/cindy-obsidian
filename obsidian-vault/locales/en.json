@@ -1,126 +1,229 @@
 {
   "name": "Obsidian Vault",
-  "description": "Search and reference local Obsidian notes in Cindy, follow wikilinks, save conversations, and add entries to your daily note.",
-  "whenToUse": "Use when the user wants to search, read, create, organize, or update Obsidian notes, vaults, Daily Notes, wikilinks, backlinks, frontmatter properties, tags, or Canvas boards, or capture chat insights into their second brain.",
+  "description": "Read and write your local Obsidian vaults directly in Cindy—no open Obsidian app or API key needed. Search and cite notes, explore links, update Daily Notes, save conversations, and edit Canvas boards.",
+  "whenToUse": "Use when the user wants to browse folders, search, read, create, edit, replace text in, or move local Obsidian notes to trash, manage tags or frontmatter properties, read or update Daily Notes, analyze wikilinks/backlinks/orphans, edit Canvas boards, or open the Obsidian workbench or desktop app.",
   "tools": {
     "vault_status": {
-      "description": "Inspect registered local Obsidian vaults, active vault statistics (note count, wikilinks, open tasks, top tags, daily/inbox folders, recent notes), and Obsidian CLI status.",
+      "description": "Inspect registered local Obsidian vaults, write policies (read-only/allowed folders), Obsidian CLI status, and active vault summary (note/link/task counts, top tag overview, daily/inbox folders, recent notes). In a partner conversation it also returns that partner's own folder (summary.defaultFolder). Call first for vault discovery; use list_tags for the full vault tag list.",
       "parameters": {
         "/properties/vault": {
-          "description": "Optional registered vault ID, name, or path; defaults to active vault."
+          "description": "Optional registered vault ID, name, or path; defaults to the active vault."
         },
         "/properties/refresh": {
-          "description": "Optional boolean to force rescanning disk index."
+          "description": "Set true to force rescanning the disk index."
+        }
+      }
+    },
+    "list_files": {
+      "description": "List subfolders and files inside a registered vault by folder, depth, and optional file extension (such as md, canvas, png). Reads directory metadata only; use search_notes to search Markdown notes by keywords, tags, or properties.",
+      "parameters": {
+        "/properties/folder": {
+          "description": "Vault-relative folder path; omit or pass empty string to start at the vault root."
+        },
+        "/properties/depth": {
+          "description": "Traversal depth (1–10). 1 lists direct children only."
+        },
+        "/properties/extension": {
+          "description": "Optional file extension filter such as md, .canvas, or png. Directories are always included."
+        },
+        "/properties/vault": {
+          "description": "Optional registered vault ID, name, or path."
         }
       }
     },
     "search_notes": {
-      "description": "Search notes by keywords, folder, tag, and property. Returns ranked pages with body match locations.",
+      "description": "Search Markdown notes by keywords, folder, tag, or YAML frontmatter property with relevance ranking, cursor pagination, and body match locations. Use list_files for folder trees or non-Markdown files.",
       "parameters": {
         "/properties/query": {
-          "description": "Space-separated search keywords matched across title, aliases, tags, headings, and body."
+          "description": "Space-separated keywords matched across title, aliases, tags, headings, and body."
         },
         "/properties/folder": {
-          "description": "Restrict search to a subfolder prefix."
+          "description": "Optional subfolder prefix to restrict search."
         },
         "/properties/tag": {
-          "description": "Filter by tag or nested tag prefix (without leading #)."
+          "description": "Optional tag filter (without leading #; matches nested subtags)."
         },
         "/properties/propertyKey": {
-          "description": "Filter by YAML frontmatter property key."
+          "description": "Optional YAML frontmatter property key to filter by."
         },
         "/properties/propertyValue": {
-          "description": "Substring required in the frontmatter property value."
+          "description": "Optional substring required inside the frontmatter property value."
         },
         "/properties/limit": {
-          "description": "Results per page, 1–50, default 15."
-        },
-        "/properties/refresh": {
-          "description": "Force refresh index before searching."
-        },
-        "/properties/vault": {
-          "description": "Optional registered target vault ID or name."
+          "description": "Results per page (1–50, default 15)."
         },
         "/properties/cursor": {
-          "description": "Pass nextCursor unchanged to continue with the same query and page size."
+          "description": "Pass nextCursor unchanged to fetch the next page with identical query and page size."
         },
         "/properties/maxMatchesPerNote": {
-          "description": "Maximum body matches per note, 1–20, default 8."
+          "description": "Maximum body match positions per note (1–20, default 8)."
+        },
+        "/properties/refresh": {
+          "description": "Force refresh the cached index before searching."
+        },
+        "/properties/vault": {
+          "description": "Optional registered vault ID, name, or path."
+        }
+      }
+    },
+    "list_tags": {
+      "description": "List vault-wide tags (combining YAML frontmatter and inline #tags) ranked by usage count with sample notes, optionally filtered by tag prefix. Use manage_tags to edit frontmatter tags on a single note.",
+      "parameters": {
+        "/properties/prefix": {
+          "description": "Optional tag or nested prefix filter (without leading #; e.g. project matches project and project/release)."
+        },
+        "/properties/limit": {
+          "description": "Maximum number of tags to return (1–200, default 50)."
+        },
+        "/properties/refresh": {
+          "description": "Force refresh the cached index before counting."
+        },
+        "/properties/vault": {
+          "description": "Optional registered vault ID, name, or path."
         }
       }
     },
     "read_note": {
-      "description": "Read a full Obsidian note, heading section, or ^block ID. The heading list includes complete heading paths.",
+      "description": "Read a Markdown note in full, by heading/headingPath, or by ^block ID, along with frontmatter, tags, full heading paths, tasks, and direct outlinks/backlinks. Use graph_links for unlinked mentions, 2-hop neighbors, or vault hubs/orphans; use daily_note for Daily Notes.",
       "parameters": {
         "/properties/path": {
-          "description": "Exact vault-relative .md path (no fuzzy guessing)."
+          "description": "Exact vault-relative .md path (no fuzzy guessing); use title if exact path is unknown."
         },
         "/properties/title": {
-          "description": "Note title, alias, or [[wikilink]] name."
+          "description": "Note title, alias, [[wikilink]], or [[Note#^blockId]]."
         },
         "/properties/heading": {
-          "description": "Optional Markdown heading to read only that section."
+          "description": "Optional Markdown heading to read only that section. Mutually exclusive with headingPath and blockId."
+        },
+        "/properties/headingPath": {
+          "description": "Optional full heading path such as [\"Project A\", \"Summary\"] to disambiguate duplicate headings. Mutually exclusive with heading and blockId."
+        },
+        "/properties/blockId": {
+          "description": "Optional Obsidian block ID such as ^meeting-summary. Mutually exclusive with heading and headingPath."
         },
         "/properties/maxChars": {
           "description": "Maximum characters returned (500–120000, default 40000)."
         },
         "/properties/vault": {
-          "description": "Optional registered target vault ID or name."
-        },
-        "/properties/headingPath": {
-          "description": "Full heading path, such as [\"Project A\", \"Summary\"]. Mutually exclusive with heading and blockId."
-        },
-        "/properties/blockId": {
-          "description": "Obsidian block ID, such as ^meeting-summary. Mutually exclusive with heading and headingPath."
+          "description": "Optional registered vault ID, name, or path."
         }
       }
     },
     "write_note": {
-      "description": "Create or edit a note, heading, block, or frontmatter. Overwriting an existing note or moving it to trash requires confirmation.",
+      "description": "Create a note or perform structured edits: overwrite, append/prepend, heading or ^block edits, and non-tag YAML frontmatter updates. In a partner conversation, a new note with no folder (or in the inbox) goes into that partner's own folder; the result returns the actual path. Use replace_in_note for literal text replacement, manage_tags for existing note tags, delete_note to move to trash, and daily_note for Daily Notes. Overwriting an existing note requires confirmation.",
       "parameters": {
         "/properties/path": {
-          "description": "Target vault-relative .md path."
+          "description": "Target vault-relative .md path (auto-appends .md if omitted)."
         },
         "/properties/mode": {
-          "description": "Use a heading edit mode with heading or headingPath, or a block edit mode with blockId."
+          "description": "Write mode (default create): create, overwrite (confirmation required), append/prepend, append-heading/prepend-heading/replace-section (with heading or headingPath), append-block/prepend-block/replace-block (with blockId), or update-frontmatter (non-tag properties)."
         },
         "/properties/heading": {
-          "description": "Target Markdown heading when using append-heading, prepend-heading, or replace-section."
-        },
-        "/properties/content": {
-          "description": "Markdown content to write or insert."
-        },
-        "/properties/frontmatter": {
-          "description": "Top-level scalar/array YAML frontmatter keys to patch (null deletes a key)."
-        },
-        "/properties/tags": {
-          "description": "Tags to merge into frontmatter tags."
-        },
-        "/properties/idempotencyKey": {
-          "description": "Optional idempotency key to prevent duplicate appends on retry."
-        },
-        "/properties/vault": {
-          "description": "Optional registered target vault ID or name."
+          "description": "Target heading for heading write modes (creates a new ## heading if missing). Use either heading or headingPath; mutually exclusive with blockId."
         },
         "/properties/headingPath": {
-          "description": "Full heading path, such as [\"Project A\", \"Summary\"]. Mutually exclusive with heading and blockId."
+          "description": "Full heading path such as [\"Project A\", \"Summary\"] for duplicate-heading disambiguation (fails if missing). Mutually exclusive with heading and blockId."
         },
         "/properties/blockId": {
-          "description": "Obsidian block ID, such as ^meeting-summary. Mutually exclusive with heading and headingPath."
+          "description": "Obsidian block ID such as ^meeting-summary for block write modes (preserves the marker). Mutually exclusive with heading and headingPath."
+        },
+        "/properties/content": {
+          "description": "Markdown body to write or insert (supports [[wikilinks]], #tags, callouts)."
+        },
+        "/properties/frontmatter": {
+          "description": "Optional top-level scalar/array YAML frontmatter keys to patch (null deletes a key). Allowed to initialize tags on create/overwrite; use manage_tags for existing notes."
+        },
+        "/properties/idempotencyKey": {
+          "description": "Optional idempotency key to prevent duplicate writes on retry."
+        },
+        "/properties/vault": {
+          "description": "Optional registered vault ID, name, or path."
+        }
+      }
+    },
+    "replace_in_note": {
+      "description": "Find and replace exact literal text (case-sensitive) in an existing Markdown note's body, heading section, or ^block ID while keeping YAML frontmatter intact. Requires a unique match by default; supports dryRun preview and expectedMtimeMs conflict checks. Use write_note for section rewrites or appends.",
+      "parameters": {
+        "/properties/path": {
+          "description": "Exact vault-relative path of an existing note."
+        },
+        "/properties/vault": {
+          "description": "Optional registered vault ID, name, or path."
+        },
+        "/properties/heading": {
+          "description": "Optional heading scope. Mutually exclusive with headingPath and blockId."
+        },
+        "/properties/headingPath": {
+          "description": "Optional full heading path such as [\"Project A\", \"Summary\"]. Mutually exclusive with heading and blockId."
+        },
+        "/properties/blockId": {
+          "description": "Optional Obsidian block ID such as ^meeting-summary. Mutually exclusive with heading and headingPath."
+        },
+        "/properties/find": {
+          "description": "Exact literal text to find (case-sensitive)."
+        },
+        "/properties/replace": {
+          "description": "Replacement text; empty string deletes matched text."
+        },
+        "/properties/replaceAll": {
+          "description": "Set true only when intentionally replacing every match in scope."
+        },
+        "/properties/expectedCount": {
+          "description": "Optional exact match count required before writing."
+        },
+        "/properties/dryRun": {
+          "description": "Set true to preview match count, scope, and mtimeMs without writing."
+        },
+        "/properties/expectedMtimeMs": {
+          "description": "Optional mtimeMs from a read or preview; aborts if the note changed."
+        },
+        "/properties/idempotencyKey": {
+          "description": "Optional idempotency key to reuse when retrying the same replacement."
+        }
+      }
+    },
+    "delete_note": {
+      "description": "Safely move an existing Markdown note into the vault trash (.trash) instead of permanent deletion. Verifies the target, obeys vault write policies, and requires Cindy confirmation.",
+      "parameters": {
+        "/properties/path": {
+          "description": "Vault-relative path of the existing Markdown note to move to trash."
+        },
+        "/properties/vault": {
+          "description": "Optional registered vault ID, name, or path."
+        },
+        "/properties/idempotencyKey": {
+          "description": "Optional idempotency key to prevent duplicate requests on retry."
+        }
+      }
+    },
+    "manage_tags": {
+      "description": "List, add, or remove YAML frontmatter tags on a single Markdown note. Matches complete tag names case-insensitively without affecting child tags, preserving the note body and other properties. Use list_tags for vault-wide tag counts.",
+      "parameters": {
+        "/properties/path": {
+          "description": "Vault-relative path of an existing Markdown note."
+        },
+        "/properties/vault": {
+          "description": "Optional registered vault ID, name, or path."
+        },
+        "/properties/operation": {
+          "description": "list (read-only), add, or remove."
+        },
+        "/properties/tags": {
+          "description": "Complete tag names required for add or remove (optional leading #; does not match child subtags)."
         }
       }
     },
     "daily_note": {
-      "description": "Read, initialize from template, or atomically append timestamped entries/tasks to an Obsidian Daily Note.",
+      "description": "Read, initialize from template, or atomically append timestamped entries or tasks to an Obsidian Daily Note using the vault's daily-note folder, date format, and template. For targeted replacements, block edits, or frontmatter changes inside a daily note, use replace_in_note, write_note, or manage_tags on its path.",
       "parameters": {
         "/properties/action": {
-          "description": "read (read-only), ensure (create if missing), append, or add-task."
+          "description": "read (read-only, never creates a file), ensure (initialize if missing), append, or add-task."
         },
         "/properties/date": {
-          "description": "Optional strict YYYY-MM-DD local calendar date."
+          "description": "Optional strict YYYY-MM-DD calendar date; defaults to today."
         },
         "/properties/content": {
-          "description": "Entry or task text for append / add-task."
+          "description": "Entry or task text required for append or add-task."
         },
         "/properties/heading": {
           "description": "Optional heading section inside the daily note."
@@ -129,41 +232,41 @@
           "description": "Prepend HH:mm timestamp on append (default true)."
         },
         "/properties/idempotencyKey": {
-          "description": "Optional idempotency key."
+          "description": "Optional idempotency key to prevent duplicate entries on retry."
         },
         "/properties/vault": {
-          "description": "Optional registered target vault ID or name."
+          "description": "Optional registered vault ID, name, or path."
         }
       }
     },
     "graph_links": {
-      "description": "Traverse Obsidian knowledge graph links: inspect outlinks, embeds, backlinks, unlinked mentions, and 2-hop neighbors, or list vault hubs, orphans, and tag distributions.",
+      "description": "Analyze Obsidian wikilink graph connections: inspect a note's outlinks, embeds, backlinks, unlinked mentions, and 2-hop neighbors, or find vault hubs and orphan notes. Use read_note for a note's body and direct links; use list_tags for vault-wide tags.",
       "parameters": {
         "/properties/mode": {
-          "description": "Graph query mode: note, hubs, orphans, or tags."
+          "description": "Graph mode: note (default), hubs (highest-degree notes), or orphans (unlinked notes)."
         },
         "/properties/path": {
-          "description": "Exact note path when mode=note."
+          "description": "Exact note relative path when mode=note."
         },
         "/properties/title": {
-          "description": "Note title when mode=note."
+          "description": "Target note title when mode=note."
         },
         "/properties/limit": {
-          "description": "Maximum items returned (1–100, default 25)."
+          "description": "Maximum results for hubs or orphans (1–100, default 25)."
         },
         "/properties/refresh": {
-          "description": "Force refresh index."
+          "description": "Force refresh the cached index."
         },
         "/properties/vault": {
-          "description": "Optional registered target vault ID or name."
+          "description": "Optional registered vault ID, name, or path."
         }
       }
     },
     "canvas_ops": {
-      "description": "List, read, create, or losslessly upsert Obsidian .canvas boards (preserving group/subpath/edge attributes; overwrite requires confirmation).",
+      "description": "List, read, create, losslessly upsert, or overwrite Obsidian .canvas boards (supports text/file/link/group nodes and preserves existing custom fields; overwrite requires confirmation).",
       "parameters": {
         "/properties/action": {
-          "description": "list, read, create, upsert, overwrite, or write."
+          "description": "list, read, create (fails if exists), upsert (creates if missing or merges by id), or overwrite (requires confirmation)."
         },
         "/properties/path": {
           "description": "Vault-relative .canvas file path."
@@ -181,43 +284,43 @@
           "description": "Edge IDs to remove during upsert."
         },
         "/properties/vault": {
-          "description": "Optional registered target vault ID or name."
+          "description": "Optional registered vault ID, name, or path."
         }
       }
     },
     "open_in_obsidian": {
-      "description": "Open a verified vault note or canvas in the desktop Obsidian app via CLI or exact-path obsidian:// URI.",
+      "description": "Open an existing note, Canvas board, attachment, or vault in the desktop Obsidian app on the execution computer (via Obsidian CLI or exact-path obsidian:// URI). Use open_workbench to open the visual panel inside Cindy.",
       "parameters": {
         "/properties/path": {
-          "description": "Optional vault-relative file path."
+          "description": "Optional vault-relative file path; omit to open the vault."
         },
         "/properties/vault": {
-          "description": "Optional registered target vault ID or name."
+          "description": "Optional registered vault ID, name, or path."
         }
       }
     },
     "open_workbench": {
-      "description": "Open the interactive Obsidian Vault workbench UI to browse notes, inspect backlinks, capture notes, or view today's Daily Note.",
+      "description": "Open the interactive Obsidian Vault workbench inside Cindy to browse folders, search notes, explore backlinks, save notes via form, log Daily Notes, or configure write rules. Use open_in_obsidian to launch the desktop Obsidian app.",
       "parameters": {
         "/properties/mode": {
           "description": "Initial tab: browse, capture, or daily."
         },
         "/properties/path": {
-          "description": "Optional initial note path."
+          "description": "Optional exact note path to preview initially."
         },
         "/properties/title": {
-          "description": "Optional initial note title."
+          "description": "Optional note title to preview initially."
         },
         "/properties/query": {
           "description": "Optional initial search query."
         },
         "/properties/vault": {
-          "description": "Optional registered target vault ID or name."
+          "description": "Optional registered vault ID, name, or path."
         }
       }
     },
     "complete_notes": {
-      "description": "App-only provider for @ composer completion returning disambiguated Obsidian wikilinks.",
+      "description": "App-only provider for @ composer completion returning disambiguated Obsidian note links. Models should call search_notes.",
       "parameters": {
         "/properties/trigger": {
           "description": "Completion trigger character."
@@ -228,30 +331,77 @@
       }
     },
     "pick_vault_dir": {
-      "description": "App-only helper to register and switch default Obsidian vault folder via system picker."
+      "description": "Workbench only: open the system folder picker to register and select the default Obsidian vault. Models should call open_workbench."
     },
-    "list_notes": {
-      "description": "List files and folders within a registered vault by relative folder, depth, and optional file extension. Reads directory metadata only."
-    },
-    "replace_in_note": {
-      "description": "Replace literal text within the body, a heading section, or a block. Defaults to a unique match. Preview and check match counts before writing. Frontmatter is preserved.",
+    "write_receipt": {
+      "description": "Workbench only: check read-only whether a previous note or daily note write request was saved.",
       "parameters": {
-        "/properties/headingPath": {
-          "description": "Full heading path, such as [\"Project A\", \"Summary\"]. Mutually exclusive with heading and blockId."
+        "/properties/vault": {
+          "description": "Vault ID used by the original write request."
         },
-        "/properties/blockId": {
-          "description": "Obsidian block ID, such as ^meeting-summary. Mutually exclusive with heading and headingPath."
+        "/properties/method": {
+          "description": "Original write tool name (write_note or daily_note)."
+        },
+        "/properties/idempotencyKey": {
+          "description": "Idempotency key of the original write request."
         }
       }
     },
-    "manage_tags": {
-      "description": "List, add, or remove complete frontmatter tags in a Markdown note. Matches ignore case and leave the body and other properties intact."
-    },
-    "write_receipt": {
-      "description": "Workbench only. Check whether a previous note or daily note request was saved, without modifying the vault."
-    },
     "set_vault_write_policy": {
-      "description": "Workbench only. Save a registered vault’s read-only flag and write folders after Cindy confirmation."
+      "description": "Workbench only: save a registered vault's read-only toggle and allowed write folders after Cindy confirmation.",
+      "parameters": {
+        "/properties/vault": {
+          "description": "Registered target vault."
+        },
+        "/properties/readOnly": {
+          "description": "When true, blocks all writes and moves to trash in the vault."
+        },
+        "/properties/restrictFolders": {
+          "description": "When true, allows writes only inside folders listed in folders."
+        },
+        "/properties/folders": {
+          "description": "Vault-relative folder paths (including subfolders); empty list blocks all writes when restricted."
+        }
+      }
+    },
+    "companion_folders": {
+      "description": "Workbench only: list local partners and their own save folders in the vault, and return the partner of the current task.",
+      "parameters": {
+        "/properties/sessionId": {
+          "description": "Optional: the page task session ID, used to identify the current partner."
+        }
+      }
+    },
+    "set_companion_folder": {
+      "description": "Workbench only: set a partner's own save folder, or pass an empty string to restore the default.",
+      "parameters": {
+        "/properties/companionId": {
+          "description": "Partner ID."
+        },
+        "/properties/folder": {
+          "description": "Vault-relative folder; an empty string restores the default."
+        }
+      }
+    },
+    "capture_reply": {
+      "description": "Only for the Save to Obsidian message body: save this AI reply as a new note in one step (partner conversations go to the partner's folder, other tasks to the inbox); repeating a request ID returns the note already saved.",
+      "parameters": {
+        "/properties/content": {
+          "description": "Markdown text of the reply."
+        },
+        "/properties/sessionId": {
+          "description": "Optional: the session ID of the reply's task, used to identify the partner."
+        },
+        "/properties/title": {
+          "description": "Optional: note title; defaults to the first line of the text."
+        },
+        "/properties/vault": {
+          "description": "Optional: registered vault ID, name, or path."
+        },
+        "/properties/idempotencyKey": {
+          "description": "Request ID that prevents duplicate saves."
+        }
+      }
     }
   }
 }

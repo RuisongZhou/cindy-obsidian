@@ -1,54 +1,78 @@
 # Obsidian Vault
 
-Find notes from your local Obsidian vault in Cindy and save useful conversations or tasks as Markdown. Everyday reading and writing works while Obsidian is closed and requires no API key.
+Search your local Obsidian notes, follow wikilinks, update Daily Notes, and save useful conversations right from Cindy. The plugin reads and writes your registered Markdown vaults directly—**no open Obsidian app or API key required**.
 
-## Get started
+## What You Can Do
 
-1. In Cindy desktop, open **Obsidian Vault** in the sidebar. Vaults already registered with Obsidian on this computer appear in the list.
-2. If your vault is missing, choose **Add vault** and select the root folder that contains your notes. Adding a vault makes it the default. The dropdown switches only the current workbench. To change the default for chat and `@` completion, use the plugin preferences.
-3. In **Browse**, search for a title, keywords, or a `#project/tag`. Open a result, then use **Linked notes** to follow outgoing links and backlinks.
+- **Search & cite notes in chat**: Type `@` in the composer to look up notes by title, path, or tag and bring your own knowledge into Cindy's answers.
+- **Save any AI reply in one click**: Choose **Save to Obsidian** from an AI reply's view menu and it is saved as a new note right away. Saving the same reply again does not create a copy, and you can edit and save another version.
+- **A folder for each partner**: New notes a partner saves in its conversation go into its own folder (`伙伴/<partner name>` by default). Change any partner's folder in the workbench under **Partner folders**.
+- **Add AI-generated .md files**: When you right-click a file in Cindy and choose to open it with the default app (or click Open in the preview), you can add it to Obsidian with a folder and name, or open it as usual.
+- **Log your Daily Note effortlessly**: Open the **Daily note** tab to append timestamped notes or checkbox tasks using your existing Obsidian daily-note folder, date format, and template.
+- **Let Cindy organize your vault**: Browse folders, search with filters, make surgical text replacements, tidy up tags, explore backlinks and orphan notes, or create and update Canvas boards in plain language.
+- **Work reliably across computers**: When viewing a remote task from another computer, the workbench shows which computer hosts the vault. If a connection drops mid-save, reconnect and check the save receipt so nothing is written twice.
 
-### Browse folders and search
+## Get Started in 3 Steps
 
-- Choose **Browse folders** to navigate folders and notes. Ask Cindy to list other types of files with `list_notes`, which accepts a vault-relative folder, depth (1–10), and extension.
-- Choose **Load more results** to continue a search. Each result with a body match shows the first matching line, column, and context. Results matched by title or metadata still appear.
-- To retrieve another page through the tool, pass `nextCursor` as `cursor` and keep the query, vault, page size, and match limit the same. Start over if results change.
+1. **Open the workbench**: Click **Obsidian Vault** in Cindy's sidebar. Vaults already registered with Obsidian on this computer appear automatically.
+2. **Select or add a vault**: If your folder isn't listed, click **Add vault** and choose your vault root (this also sets it as the default). The dropdown switches only the current workbench; change the default for chat and `@` completion in plugin settings.
+3. **Explore or capture**: Search by keyword or `#tag`, click **Browse folders** to walk your directory tree, or open a note and follow outgoing links and backlinks under **Linked notes**.
 
-## Use it in a conversation
+## Everyday Workflows
 
-- **Reference a note.** Type `@` in the composer and search by title, path, or tag. Choose a result to insert a reference. After you send the message, Cindy can use the reference to read the note.
-- **Save a reply.** Use the view selector on an AI reply and choose **Save to Obsidian**. The form loads that reply. Review the vault, relative path, and body before saving. New notes default to `Inbox/`. You can also append to an existing note or under a heading, then open the saved note from the receipt.
-- **Log something today.** Open **Daily note** from the composer’s **Obsidian** button. Add a timestamped entry or a checkbox task. The first write creates the file using Obsidian’s Daily Notes folder, date format, and available template.
-- **Ask Cindy to organize your notes.** Try “`$obsidian` find the release notes tagged `#project` and show their paths.” Use `/obsidian-capture` to turn a conversation into a note or `/obsidian-daily` to review and update a journal. Cindy can also query frontmatter properties, find unlinked mentions, and update Canvas boards.
+- **Reference a note**: Type `@` in the composer, pick a note, and send your question so Cindy can read the full text.
+- **Save an AI reply**: Choose **Save to Obsidian** from a message's view switcher. Partner conversations save to that partner's folder and other tasks to `Inbox/`. Afterwards you can open the note in Obsidian, or choose **Edit and save again** to append to an existing note or heading.
+- **Built-in slash skills**:
+  - `/obsidian-capture`: Distill the current conversation into a structured note with `[[wikilinks]]` and frontmatter tags.
+  - `/obsidian-daily`: Review today's plan, add tasks, or write an end-of-day wrap-up.
+- **Ask naturally**: Try "`$obsidian` find release notes tagged `#project`", "replace `TBD` with `Confirmed` in `Plan.md`", or "turn today's architecture notes into a Canvas board."
 
-## Use the workbench from another computer
+## Precision Editing & Organization
 
-- In a remote task, ask “`$obsidian` open the vault workbench.” When Cindy supports remote task cards, the viewing computer can use the card directly. The header shows the system hostname of the vault computer, where vault reads, writes, and Obsidian open requests take place. The global workbench uses the plugin instance associated with its entry point.
-- If the connection drops during a save, reconnect and choose **Check save result**. A saved receipt provides the vault-relative path. If the current form still has the original input and no receipt is found, you can retry the same request. If the result remains uncertain, check the target note first. With Cindy card state support, reopening the original card also restores the receipt check.
+- **Folder browsing & paginated search**: Walk folders and filter any file type (`.md`, `.canvas`, images, etc.) with `list_files`, or search Markdown notes by text, tag, folder, and frontmatter properties with cursor pagination and match positions.
+- **Duplicate headings & block IDs**: Target repeated headings accurately using full heading paths (such as `["Project A", "Summary"]`) or Obsidian block IDs (`^summary`) without breaking code fences or unrelated sections.
+- **Safe literal replacement**: Preview match counts first (`dryRun`), require a unique match by default, and check file modification time (`expectedMtimeMs`) to avoid overwriting concurrent edits.
+- **Clean tag management**: View vault-wide tag counts (`list_tags`) or list, add, and remove YAML frontmatter tags on a single note (`manage_tags`) with case-insensitive exact matching—removing `#project` never removes `#project/release` or inline `#project` tags.
+- **Safe trash instead of permanent deletion**: Deleting a note moves it into the vault's `.trash` folder only after Cindy confirms the exact target with you.
 
-## Edit a specific passage
+## Privacy & Safety Guardrails
 
-- Use `headingPath: ["Project A", "Summary"]` to read or edit a section with a repeated heading name. `read_note` includes the full path of every heading in its outline.
-- Use `blockId: "^summary"` with the note path, or read `[[Plan#^summary]]`. Block edits preserve the reference marker. Unsupported or ambiguous targets are refused.
-- Use `replace_in_note` for case-sensitive literal replacement in the body, a section, or a block. Start with `dryRun: true` to check the number of matches. A write requires a unique match by default, and you can pass the preview’s `mtimeMs` as `expectedMtimeMs`.
+- **Local-only access**: The local Node worker accesses only vaults you registered and has no network service of its own. Write receipts stay in your computer's local application data folder to prevent duplicate saves on reconnect. Content read during a chat enters the context of the model you selected.
+- **Per-vault write rules**: Under **Browse → Vault write rules**, mark a vault **read-only** or limit writes to specific subfolders (such as `Inbox` or `Daily`). Rules apply to note edits, saved replies, Daily Notes, tag changes, Canvas updates, and moves to trash, while browsing and reading remain available.
+- **Explicit confirmation for destructive actions**: Cindy always prompts you to confirm before overwriting an existing note, replacing an entire Canvas board, moving a note to `.trash`, or changing a vault's write rules.
+- **Official command line interface (optional)**: After you turn it on in Obsidian under **Settings → General → Command line interface**, the plugin uses it for link, tag and today's Daily Note queries while the vault is open in Obsidian. It only runs a fixed set of query commands and "open note", and never writes, moves or deletes notes through it.
+- **Open in Obsidian desktop**: Jump straight to any note or Canvas in the Obsidian desktop app on the vault computer (requires Obsidian installed there).
 
-## Write rules and tags
+## Changelog
 
-- In **Browse → Vault write rules**, set each vault to read-only or allow writes to selected vault-relative folders and their subfolders. A restricted empty list blocks all writes. Existing setups default to allowing writes throughout the vault.
-- Rules apply to the plugin’s note edits, saved replies, daily notes, Canvas changes, and moves to trash. Search and read access continue to work. Saved rules also apply when registered vaults overlap.
-- Use `manage_tags` to list, add, or remove YAML frontmatter tags. Matches are case-insensitive and use the complete tag name. Removing `#project` keeps `#project/release` and inline tags in the note body.
+### v1.1.4
 
-## Files and permissions
+- When Obsidian is running with its official command line interface turned on, backlinks, unresolved links, vault tag counts and today's Daily Note path come straight from Obsidian, so they match what Obsidian shows. Otherwise the plugin reads the files as before. Writes always go directly to the files.
+- **Open in Obsidian** now targets the vault by ID, so vaults with the same name no longer open the wrong one.
 
-- An on-demand Node worker reads and writes registered vaults. It keeps write receipts in the current user's application data on that computer to recognize retried requests. The plugin has no network service of its own. When you ask Cindy to work with a note, the retrieved text can enter the task context of the model you selected.
-- Files are ordinary Markdown or `.canvas` files. Cindy asks you to confirm before overwriting an existing note or Canvas board or moving a note to `.trash`.
-- The reply view provides the selected reply so you can edit it before saving. A workbench opened from a task can insert references into that task’s draft. You decide when to send. **Open Obsidian on the vault computer** requires Obsidian desktop on that computer.
+### v1.1.3
+
+- Each partner can have its own folder in the vault. New notes a partner saves with no folder, or to the inbox, go there.
+- Saving an AI reply now takes one click, and the same reply is never saved twice.
+- Opening a .md file in Cindy can add it to Obsidian (can be turned off in settings).
+
+### v1.1.2
+- **Folder browsing & paginated search**: Added folder-tree browsing with extension filtering, plus cursor pagination and body match positions in search results.
+- **Precision editing**: Added full heading-path disambiguation for duplicate headings, Obsidian `^block ID` reads/edits, and literal find-and-replace with dry-run previews and conflict checks.
+- **Write guardrails & tag tools**: Added per-vault read-only and allowed-folder write rules, vault-wide tag statistics, exact single-note frontmatter tag management, and a dedicated confirmed move-to-trash tool.
+- **Remote & reconnect reliability**: Workbench now displays the vault's host computer and lets you verify write receipts after a dropped connection to avoid duplicate saves.
+- **Cleaner toolset**: Removed duplicate entry points and clarified tool descriptions for more reliable tool selection.
+
+### v1.1.1
+- Initial release: Read and write local registered Obsidian vaults directly in Cindy with no open Obsidian app or API key needed.
+- Included the interactive workbench, `@` note references, one-click saving of AI replies, Daily Note logging, wikilink graph exploration, Canvas editing, desktop Obsidian launch, and the `/obsidian-capture` and `/obsidian-daily` skills.
 
 ## Troubleshooting
 
-- **Vault missing.** Use **Add vault** and choose the folder on the computer running Cindy. The dropdown shows paths for vaults with the same name.
-- **Search misses a recent change.** Choose **Refresh index**. The workbench warns when only part of a large vault was indexed.
-- **A note already exists.** Change the relative path or choose an append option after checking the destination. The form keeps your text if a save fails.
-- **Workbench or `@` completion is unavailable.** Check that the plugin is enabled, you are using Cindy desktop, and the vault is on the computer running the plugin. You can also try a direct `$obsidian` request.
+- **Vault missing**: Click **Add vault** on the computer running Cindy and pick the folder directly. Vaults with identical names display their paths in the dropdown.
+- **Backlinks or tag counts differ from Obsidian**: Turn on **Command line interface** under Obsidian **Settings → General** and keep the vault open in Obsidian; the plugin then uses Obsidian's own results.
+- **Recent edits not showing up**: Click **Refresh index**. Large vaults show a notice if scanning hits index limits.
+- **Note already exists**: Choose another path or switch to an append mode. Your draft stays intact if a save is rejected.
+- **Workbench or `@` completion unavailable**: Verify the plugin is enabled on Cindy desktop and that the vault exists on the computer running the plugin, or invoke it directly with `$obsidian`.
 
-Requires Cindy 0.1.143 or newer. Desktop integration supports Obsidian 1.15.1 or newer. When reporting a problem, include your Cindy version, plugin version, and steps to reproduce. Remove private paths and note contents before sharing.
+Requires **Cindy 0.1.143 or newer**; desktop integration supports **Obsidian 1.15.1 or newer**.

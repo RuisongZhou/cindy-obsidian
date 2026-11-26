@@ -8,6 +8,8 @@ const { execFile } = require('node:child_process');
 const { promisify } = require('node:util');
 const { TextDecoder } = require('node:util');
 const { prepareWrite, getWriteReceipt } = require('./write-receipts.cjs');
+const obsidianCli = require('./obsidian-cli.cjs');
+const { detectObsidianCli } = obsidianCli;
 
 const execFileAsync = promisify(execFile);
 const strictUtf8Decoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: false });
@@ -36,6 +38,17 @@ function reply(message) {
   process.stdout.write(JSON.stringify(message) + '\n');
 }
 
+// Read-only queries prefer Obsidian's own index through its official CLI. Any failure
+// (app closed, CLI turned off, vault not open, odd output) means "use the filesystem index".
+async function withObsidianCli(vault, fn) {
+  try {
+    const session = await obsidianCli.sessionForVault(vault);
+    return { ok: true, value: await fn(session) };
+  } catch (err) {
+    return { ok: false, reason: (err && err.code) || 'CLI_ERROR' };
+  }
+}
+
 function withWriteLock(lockKey, fn) {
   const prev = writeLocks.get(lockKey) || Promise.resolve();
   const next = prev.catch(() => {}).then(fn);
@@ -61,51 +74,6 @@ function getObsidianConfigCandidates() {
     list.push(path.join(home, '.var', 'app', 'md.obsidian.Obsidian', 'config', 'obsidian', 'obsidian.json'));
   }
   return list;
-}
-
-function getTrustedObsidianCliCandidates() {
-  const list = [];
-  if (process.platform === 'darwin') {
-    list.push('/Applications/Obsidian.app/Contents/MacOS/obsidian-cli');
-    list.push(path.join(os.homedir(), 'Applications', 'Obsidian.app', 'Contents', 'MacOS', 'obsidian-cli'));
-  } else if (process.platform === 'win32') {
-    const localApp = process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local');
-    list.push(path.join(localApp, 'Programs', 'obsidian', 'Obsidian.com'));
-  } else {
-    list.push('/usr/bin/obsidian');
-    list.push('/usr/local/bin/obsidian');
-  }
-  return list;
-}
-
-async function detectObsidianCli() {
-  for (const bin of getTrustedObsidianCliCandidates()) {
-    try {
-      if (!fs.existsSync(bin)) continue;
-      const st = fs.statSync(bin);
-      if (!st.isFile()) continue;
-      const { stdout, stderr } = await execFileAsync(bin, ['version'], { timeout: 1500 });
-      const out = String(stdout || stderr || '').trim();
-      if (out.includes('Command line interface is not enabled')) {
-        return { installed: true, running: false, cliEnabled: false, binary: bin, message: out };
-      }
-      if (out.includes('unable to find Obsidian')) {
-        return { installed: true, running: false, cliEnabled: true, binary: bin, message: out };
-      }
-      if (out) {
-        return { installed: true, running: true, cliEnabled: true, binary: bin, version: out };
-      }
-    } catch (err) {
-      const msg = String((err && (err.stdout || err.stderr || err.message)) || '').trim();
-      if (msg.includes('Command line interface is not enabled')) {
-        return { installed: true, running: false, cliEnabled: false, binary: bin, message: msg };
-      }
-      if (msg.includes('unable to find Obsidian')) {
-        return { installed: true, running: false, cliEnabled: true, binary: bin, message: msg };
-      }
-    }
-  }
-  return { installed: false, running: false, cliEnabled: false, binary: null };
 }
 
 function safeRealpath(targetPath) {
@@ -597,26 +565,33 @@ function serializeYamlEntry(key, val, eol = '\n') {
   return [safeKey + ': ' + serializeYamlScalar(val)];
 }
 
-function patchFrontmatterPreservingRaw(parsed, fmPatch, extraTags) {
+function normalizeFrontmatterTagValues(rawVal) {
+  let items = [];
+  if (Array.isArray(rawVal)) {
+    items = rawVal.map((item) => cleanTag(String(item)));
+  } else if (typeof rawVal === 'string') {
+    const trimmed = rawVal.trim();
+    items = trimmed ? trimmed.split(/[,\s]+/).filter(Boolean).map(cleanTag) : [];
+  } else {
+    throw makeError('INVALID_TAG', 'Frontmatter 的 tags 必须是字符串或字符串数组，且每项为完整标签名。');
+  }
+  const deduped = new Map();
+  for (const tag of items) {
+    const key = tagKey(tag);
+    if (!deduped.has(key)) deduped.set(key, tag);
+  }
+  return Array.from(deduped.values());
+}
+
+function patchFrontmatterPreservingRaw(parsed, fmPatch) {
   const hasPatch = fmPatch && Object.keys(fmPatch).length > 0;
-  const hasTags = Array.isArray(extraTags) && extraTags.length > 0;
-  if (!hasPatch && !hasTags) {
+  if (!hasPatch) {
     return { rawBlock: parsed.rawBlock, frontmatter: parsed.frontmatter };
   }
 
   const eol = parsed.eol || '\n';
   const updates = new Map();
-  if (hasPatch) {
-    for (const [k, v] of Object.entries(fmPatch)) updates.set(k, v);
-  }
-  if (hasTags) {
-    const baseTags = updates.has('tags')
-      ? (Array.isArray(updates.get('tags')) ? updates.get('tags') : [updates.get('tags')].filter(Boolean))
-      : (Array.isArray(parsed.frontmatter.tags)
-          ? parsed.frontmatter.tags.map(String)
-          : (typeof parsed.frontmatter.tags === 'string' && parsed.frontmatter.tags ? [parsed.frontmatter.tags] : []));
-    updates.set('tags', Array.from(new Set([...baseTags, ...extraTags])));
-  }
+  for (const [k, v] of Object.entries(fmPatch)) updates.set(k, v);
 
   if (!parsed.hasFrontmatter) {
     const lines = ['---'];
@@ -1565,13 +1540,138 @@ function bodyMatches(note, terms, maxMatches) {
   return { matches, matchesTruncated: needles.length > 0 };
 }
 
+const MARKDOWN_FILE_EXTS = new Set(['.md', '.markdown']);
+
+function foldPath(value) {
+  const normalized = String(value).normalize('NFC');
+  return process.platform === 'darwin' || process.platform === 'win32' ? normalized.toLowerCase() : normalized;
+}
+
+function settingsInboxFolder(settings = {}) {
+  try {
+    return relativeFolder(String(settings.inbox_folder ?? settings.inboxFolder ?? 'Inbox').trim() || 'Inbox') || 'Inbox';
+  } catch {
+    return 'Inbox';
+  }
+}
+
+// main.js resolves the calling partner from the host session; the model cannot supply it.
+function normalizeCompanion(raw) {
+  if (!raw || typeof raw !== 'object' || typeof raw.id !== 'string' || typeof raw.folder !== 'string') return null;
+  const name = typeof raw.name === 'string' ? raw.name.slice(0, 120) : '';
+  try {
+    const folder = relativeFolder(raw.folder.trim());
+    return folder ? { id: raw.id, name, folder } : null;
+  } catch {
+    return { id: raw.id, name, folder: null, folderError: '伙伴专属文件夹「' + raw.folder + '」无效，已改用原路径。' };
+  }
+}
+
+function startsWithFolder(segments, folderSegments) {
+  return segments.length > folderSegments.length &&
+    folderSegments.every((part, index) => foldPath(part) === foldPath(segments[index]));
+}
+
+// Only default destinations move: a bare file name, or a path in the inbox. Explicit folders are kept.
+function companionFolderTarget(rel, companion, settings) {
+  if (!companion?.folder) return null;
+  const segments = rel.split('/');
+  const folderSegments = companion.folder.split('/');
+  if (startsWithFolder(segments, folderSegments)) return null;
+  if (segments.length === 1) return companion.folder + '/' + rel;
+  const inboxSegments = settingsInboxFolder(settings).split('/');
+  if (startsWithFolder(segments, inboxSegments)) {
+    return companion.folder + '/' + segments.slice(inboxSegments.length).join('/');
+  }
+  return null;
+}
+
+function safeFileStem(value, fallback) {
+  const stem = String(value || '')
+    .replace(/\.(md|markdown)$/i, '')
+    .replace(/[\u0000-\u001f\u007f]/g, ' ')
+    .replace(/[\\/:*?"<>|#^[\]]/g, '-')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/^[.\s]+/, '')
+    .slice(0, 80)
+    .trim();
+  return stem || fallback;
+}
+
+function noteTitleFromMarkdown(content) {
+  let fenced = false;
+  for (const line of parseFrontmatter(content).body.split(/\r?\n/)) {
+    const text = line.trim();
+    if (/^(```|~~~)/.test(text)) {
+      fenced = !fenced;
+      continue;
+    }
+    if (fenced || !text || /^(-{3,}|\*{3,}|_{3,}|<!--|\|)/.test(text)) continue;
+    return text
+      .replace(/^#{1,6}\s+/, '')
+      .replace(/^(?:[-*+>]|\d+[.)])\s+/, '')
+      .replace(/\[\[([^\]|]*)(?:\|([^\]]*))?\]\]/g, (_, target, alias) => alias || target)
+      .replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1')
+      .replace(/[*_`~]/g, '')
+      .trim()
+      .slice(0, 80);
+  }
+  return '';
+}
+
+async function inspectExternalMarkdown(params) {
+  const file = params.file;
+  if (typeof file !== 'string' || !path.isAbsolute(file) || file.includes('\0')) {
+    throw makeError('INVALID_PATH', '请提供本机 Markdown 文件的绝对路径。');
+  }
+  if (!MARKDOWN_FILE_EXTS.has(path.extname(file).toLowerCase())) {
+    throw makeError('UNSUPPORTED_FILE_EXTENSION', '只支持添加 .md 或 .markdown 文件。');
+  }
+  const stat = await fsp.lstat(file).catch(() => null);
+  if (!stat || stat.isSymbolicLink() || !stat.isFile()) throw makeError('NOT_REGULAR_FILE', '找不到这个 Markdown 文件。');
+  if (stat.size > MAX_READ_FILE_BYTES) throw makeError('FILE_TOO_LARGE', '文件超过 8 MB，无法添加到知识库。');
+  const real = safeRealpath(file) || file;
+  const settings = params.settings || {};
+  const vaults = discoverVaults(settings).filter((vault) => vault.exists);
+  const container = vaults.find((vault) => isPathInsideRoot(foldPath(vault.path), foldPath(real)));
+  let defaultVault = null;
+  try {
+    defaultVault = resolveVault({ settings }).vault.id;
+  } catch {
+    // The dialog asks the user to choose a vault.
+  }
+  return {
+    name: path.basename(file),
+    stem: safeFileStem(path.basename(file), 'Note'),
+    size: stat.size,
+    insideVault: container ? { id: container.id, name: container.name } : null,
+    vaults: vaults.map((vault) => ({ id: vault.id, name: vault.name })),
+    defaultVault,
+    inboxFolder: settingsInboxFolder(settings),
+  };
+}
+
+async function openWithDefaultApp(file) {
+  if (process.platform === 'darwin') {
+    await execFileAsync('/usr/bin/open', [file], { timeout: 5000 });
+  } else if (process.platform === 'win32') {
+    // explorer.exe exits with status 1 even after it opens the file.
+    await execFileAsync('explorer.exe', [file], { timeout: 5000 }).catch((err) => {
+      if (err?.code !== 1) throw err;
+    });
+  } else {
+    await execFileAsync('xdg-open', [file], { timeout: 5000 });
+  }
+}
+
 const handlers = {
   async inspect_vault_write_policy(params = {}) {
     const { vault } = resolveVault(params);
     const policy = params.policy === undefined ? vaultWritePolicy(vault, params.settings) : normalizeWritePolicy(params.policy);
     return { vault: { id: vault.id, name: vault.name, path: vault.path }, policy };
   },
-  async list_notes(params = {}) {
+  async list_files(params = {}) {
     const { vault } = resolveVault(params);
     const folder = relativeFolder(params.folder);
     const depth = params.depth ?? 1;
@@ -1617,6 +1717,7 @@ const handlers = {
 
       const dailyCfg = readDailyNoteConfig(activeVault.path, settings);
       const inboxFolder = String(settings.inbox_folder ?? settings.inboxFolder ?? 'Inbox').trim() || 'Inbox';
+      const companion = normalizeCompanion(params._companion);
       const nowLocal = formatMomentPattern(new Date(), 'YYYY-MM-DD');
       summary = {
         noteCount: idx.notes.length,
@@ -1628,6 +1729,8 @@ const handlers = {
         topTags,
         dailyNotes: dailyCfg,
         inboxFolder,
+        defaultFolder: companion?.folder || inboxFolder,
+        companion,
         localDate: nowLocal,
         truncatedScan: idx.truncatedScan,
         warnings: idx.warnings,
@@ -1648,7 +1751,13 @@ const handlers = {
       writePolicy: activeVault ? vaultWritePolicy(activeVault, settings) : null,
       activeVaultError,
       vaults: vaults.map((v) => ({ id: v.id, name: v.name, path: v.path, open: v.open, source: v.source, exists: v.exists })),
-      obsidianCli: cli,
+      obsidianCli: {
+        ...cli,
+        // Whether link, tag and daily-note queries for the active vault go through Obsidian itself.
+        activeVaultQueries: activeVault
+          ? await withObsidianCli(activeVault, async () => true).then((r) => (r.ok ? { usable: true } : { usable: false, reason: r.reason }))
+          : { usable: false, reason: 'NO_ACTIVE_VAULT' },
+      },
       summary,
     };
   },
@@ -1760,8 +1869,9 @@ const handlers = {
       throw makeError('MISSING_NOTE_TARGET', '请提供要读取的笔记 path（精确相对路径）或 title（笔记标题 / 别名 / 双链名）。');
     }
 
-    const blockLink = /^\[\[([^#|\]]+)#\^([A-Za-z0-9-]+)(?:\|[^\]]*)?\]\]$/
-      .exec((hasExplicitPath ? params.path : params.title).trim());
+    const blockLink = !hasExplicitPath
+      ? /^\[\[([^#|\]]+)#\^([A-Za-z0-9-]+)(?:\|[^\]]*)?\]\]$/.exec(params.title.trim())
+      : null;
     let targetInfo;
     let ambiguousCandidates = [];
     if (hasExplicitPath) {
@@ -1860,6 +1970,15 @@ const handlers = {
   async write_note(params = {}) {
     const { vault } = resolveVault(params);
     const mode = params.mode || 'create';
+    if (mode === 'delete') {
+      throw makeError('USE_DELETE_NOTE', '移入回收站已独立为 delete_note 工具，请改用 delete_note。');
+    }
+    if (mode === 'replace-text') {
+      throw makeError('INVALID_WRITE_MODE', '局部字面查找替换请改用 replace_in_note 工具。');
+    }
+    if (mode === 'manage-tags') {
+      throw makeError('INVALID_WRITE_MODE', '管理笔记标签请改用 manage_tags 工具。');
+    }
     const validModes = new Set([
       'create',
       'overwrite',
@@ -1871,73 +1990,77 @@ const handlers = {
       'replace-block',
       'append-block',
       'prepend-block',
-      'replace-text',
-      'manage-tags',
       'update-frontmatter',
-      'delete',
     ]);
     if (!validModes.has(mode)) {
       throw makeError('INVALID_WRITE_MODE', '不支持的写入模式 "' + mode + '"。');
     }
+    if (params.tags !== undefined) {
+      throw makeError('USE_MANAGE_TAGS', 'write_note 不再接受顶层 tags 参数。新建笔记请在 frontmatter.tags 中设置标签；修改已有笔记标签请使用 manage_tags。');
+    }
     const isBlockEdit = mode.endsWith('-block');
-    const isTextEdit = mode === 'replace-text';
     const isHeadingEdit = ['append-heading', 'prepend-heading', 'replace-section'].includes(mode);
-    if ((params.blockId !== undefined && !isBlockEdit && !isTextEdit) ||
-        (params.headingPath !== undefined && !isHeadingEdit && !isTextEdit)) {
+    if ((params.blockId !== undefined && !isBlockEdit) ||
+        (params.headingPath !== undefined && !isHeadingEdit)) {
       throw makeError('INVALID_NOTE_SCOPE', '当前写入模式不支持指定的块或标题路径。');
     }
 
-    const targetInfo = resolveSafeVaultTarget(vault.path, params.path, { requiredExt: '.md' });
-    const tagRead = mode === 'manage-tags' && params.operation === 'list';
-    if (!(isTextEdit && params.dryRun) && !tagRead) assertVaultWritable(vault, targetInfo, params.settings);
+    const rawFm = params.frontmatter && typeof params.frontmatter === 'object' && !Array.isArray(params.frontmatter)
+      ? params.frontmatter
+      : null;
+    if (params.frontmatter !== undefined && !rawFm) {
+      throw makeError('UNSUPPORTED_FRONTMATTER_VALUE', 'frontmatter 必须是键值对对象。');
+    }
+    const isWholeNoteWrite = mode === 'create' || mode === 'overwrite';
+    let incomingFm = rawFm;
+    if (rawFm) {
+      const hasTagField = Object.hasOwn(rawFm, 'tags') || Object.hasOwn(rawFm, 'tag');
+      if (hasTagField && !isWholeNoteWrite) {
+        throw makeError('USE_MANAGE_TAGS', '修改已有笔记的 Frontmatter 标签请改用 manage_tags（支持 list、add、remove，并按完整标签名大小写不敏感匹配）。');
+      }
+      if (hasTagField) {
+        incomingFm = { ...rawFm };
+        for (const key of ['tags', 'tag']) {
+          if (Object.hasOwn(incomingFm, key) && incomingFm[key] !== null && incomingFm[key] !== undefined) {
+            incomingFm[key] = normalizeFrontmatterTagValues(incomingFm[key]);
+          }
+        }
+      }
+    }
+
+    let requestedPath = params.path;
+    let companionNote = null;
+    const companion = mode === 'create' ? normalizeCompanion(params._companion) : null;
+    if (companion?.folder) {
+      const original = normalizeRelPath(params.path, '.md');
+      const redirected = companionFolderTarget(original, companion, params.settings);
+      if (redirected) {
+        requestedPath = redirected;
+        companionNote = { companionFolder: companion.folder, redirectedFrom: original };
+      }
+    } else if (companion?.folderError) {
+      companionNote = { companionFolderWarning: companion.folderError };
+    }
+    const targetInfo = resolveSafeVaultTarget(vault.path, requestedPath, { requiredExt: '.md' });
+    assertVaultWritable(vault, targetInfo, params.settings);
     const lockKey = vault.path + '::' + targetInfo.rel;
 
     return withWriteLock(lockKey, async () => {
-      const { previous, commit } = await prepareWrite(vault, 'write_note', params.dryRun || tagRead ? null : params.idempotencyKey, {
+      const { previous, commit } = await prepareWrite(vault, 'write_note', params.idempotencyKey, {
         rel: targetInfo.rel, mode, heading: params.heading, headingPath: params.headingPath, blockId: params.blockId,
-        content: params.content, frontmatter: params.frontmatter, tags: params.tags, operation: params.operation,
-        find: params.find, replace: params.replace, replaceAll: params.replaceAll, expectedCount: params.expectedCount,
+        content: params.content, frontmatter: incomingFm,
       });
       if (previous) return previous;
 
       const freshTarget = resolveSafeVaultTarget(vault.path, targetInfo.rel, { requiredExt: '.md' });
-
-      if (mode === 'delete') {
-        if (!freshTarget.exists) {
-          throw makeError('NOTE_NOT_FOUND', '要移入回收站的笔记 "' + freshTarget.rel + '" 不存在。');
-        }
-        const curStat = await fsp.lstat(freshTarget.abs);
-        if (params.expectedMtimeMs !== undefined && params.expectedMtimeMs !== null && Math.abs(curStat.mtimeMs - Number(params.expectedMtimeMs)) > 1) {
-          throw makeError('WRITE_CONFLICT', '笔记在确认前已被外部修改，已取消移入回收站。');
-        }
-        const trashRel = '.trash/' + freshTarget.rel.replace(/\//g, '__').replace(/\.md$/i, '') + '.' + Date.now() + '-' + crypto.randomBytes(3).toString('hex') + '.md';
-        const trashTarget = resolveSafeVaultTarget(vault.path, trashRel, { requiredExt: '.md', allowProtectedRoot: '.trash' });
-        await ensureSafeParentDirs(vault.path, trashTarget.segments);
-        return commit(async () => {
-          const fh = await fsp.open(trashTarget.abs, 'wx', 0o600);
-          await fh.close();
-          await fsp.rename(freshTarget.abs, trashTarget.abs);
-          invalidateVaultCache(vault.path);
-          return {
-            action: 'moved_to_obsidian_trash',
-            vault: { id: vault.id, name: vault.name, path: vault.path },
-            path: freshTarget.rel,
-            trashFile: trashTarget.rel,
-          };
-        });
-      }
-
       if (mode === 'create' && freshTarget.exists) {
         throw makeError('NOTE_ALREADY_EXISTS', '笔记 "' + freshTarget.rel + '" 已存在。若需追加请使用 mode="append" 或 "append-heading"，若确实需要覆盖请使用 mode="overwrite"。');
       }
-      if ((mode === 'update-frontmatter' || mode === 'manage-tags' || isBlockEdit || isTextEdit || params.headingPath !== undefined) && !freshTarget.exists) {
+      if ((mode === 'update-frontmatter' || isBlockEdit || params.headingPath !== undefined) && !freshTarget.exists) {
         throw makeError('NOTE_NOT_FOUND', '要修改的笔记 "' + freshTarget.rel + '" 不存在。');
       }
 
       const incomingContent = typeof params.content === 'string' ? params.content : '';
-      const incomingFm = params.frontmatter && typeof params.frontmatter === 'object' && !Array.isArray(params.frontmatter) ? params.frontmatter : null;
-      const incomingTags = Array.isArray(params.tags) ? params.tags.map((t) => String(t).replace(/^#+/, '').trim()).filter(Boolean) : null;
-
       let origRaw = '';
       let origBom = false;
       let origMtimeMs = params.expectedMtimeMs !== undefined && params.expectedMtimeMs !== null ? Number(params.expectedMtimeMs) : null;
@@ -1951,32 +2074,13 @@ const handlers = {
         }
       }
 
-      let baseParsed;
-      if (mode === 'create' || mode === 'overwrite') {
-        baseParsed = parseFrontmatter(incomingContent);
-      } else {
-        baseParsed = parseFrontmatter(origRaw);
-      }
-
+      const baseParsed = isWholeNoteWrite ? parseFrontmatter(incomingContent) : parseFrontmatter(origRaw);
       const eol = baseParsed.eol || '\n';
-      const tagEdit = mode === 'manage-tags' ? editNoteTags(baseParsed, params.operation, params.tags) : null;
-      const tagResult = tagEdit ? { tags: tagEdit.tags, applied: tagEdit.applied, skipped: tagEdit.skipped, location: 'frontmatter' } : null;
-      if (tagEdit && !tagEdit.applied.length) {
-        return { action: params.operation, path: freshTarget.rel, ...tagResult };
-      }
-      const patchedFm = patchFrontmatterPreservingRaw(baseParsed, tagEdit?.patch ?? incomingFm, tagEdit ? null : incomingTags);
+      const patchedFm = patchFrontmatterPreservingRaw(baseParsed, incomingFm);
 
       let nextBody = baseParsed.body;
       let editDetails;
-      if (isTextEdit) {
-        const edit = replaceInBody(nextBody, params, eol);
-        editDetails = { matchCount: edit.count, scope: edit.range.type, headingPath: edit.range.path, blockId: edit.range.id };
-        if (params.dryRun) {
-          return { action: 'preview', path: freshTarget.rel, mtimeMs: origMtimeMs, ...editDetails };
-        }
-        if (edit.range.type === 'block') verifyBlockRange(edit.body, edit.range, edit.body.length - nextBody.length);
-        nextBody = edit.body;
-      } else if (isBlockEdit) {
+      if (isBlockEdit) {
         const block = selectNoteRange(nextBody, params);
         if (block.type !== 'block' || !incomingContent.trim()) {
           throw makeError('INVALID_BLOCK_EDIT', '块写入需要 blockId 和非空正文。');
@@ -2004,17 +2108,16 @@ const handlers = {
           throw makeError('AMBIGUOUS_NOTE_SCOPE', '请在 heading 和 headingPath 中只指定一项。');
         }
         if (params.headingPath === undefined && (!params.heading || !String(params.heading).trim())) {
-          throw makeError('MISSING_HEADING', '模式 "' + mode + '" 需要指定目标章节标题参数 heading。');
+          throw makeError('MISSING_HEADING', '模式 "' + mode + '" 需要指定目标章节标题参数 heading 或 headingPath。');
         }
         nextBody = modifyBodyUnderHeading(nextBody, params.heading, incomingContent, mode, params.headingPath);
-      } else if (mode === 'update-frontmatter' || tagEdit) {
+      } else if (mode === 'update-frontmatter') {
         // Preserve exact body byte-for-byte!
       } else {
-        // create or overwrite: preserve exact body except ensuring trailing newline
         if (nextBody && !nextBody.endsWith('\n')) nextBody += eol;
       }
 
-      const exactBody = isBlockEdit || isTextEdit || tagEdit || params.headingPath !== undefined;
+      const exactBody = isBlockEdit || params.headingPath !== undefined;
       const finalRaw = patchedFm.rawBlock + (patchedFm.rawBlock && !exactBody ? nextBody.replace(/^\r?\n/, '') : nextBody);
       return commit(async () => {
         const bytesWritten = await atomicWriteUtf8File(vault.path, freshTarget, finalRaw, {
@@ -2025,25 +2128,217 @@ const handlers = {
         invalidateVaultCache(vault.path);
         const afterStat = await fsp.lstat(freshTarget.abs);
         return {
-          action: tagEdit ? params.operation : freshTarget.exists ? mode : 'created',
+          action: freshTarget.exists ? mode : 'created',
           vault: { id: vault.id, name: vault.name, path: vault.path },
           path: freshTarget.rel,
           bytesWritten,
           mtimeMs: afterStat.mtimeMs,
           frontmatter: patchedFm.frontmatter,
           ...editDetails,
-          ...tagResult,
+          ...companionNote,
+        };
+      });
+    });
+  },
+
+  async delete_note(params = {}) {
+    const { vault } = resolveVault(params);
+    const targetInfo = resolveSafeVaultTarget(vault.path, params.path, { requiredExt: '.md' });
+    assertVaultWritable(vault, targetInfo, params.settings);
+    const lockKey = vault.path + '::' + targetInfo.rel;
+
+    return withWriteLock(lockKey, async () => {
+      const { previous, commit } = await prepareWrite(vault, 'delete_note', params.idempotencyKey, {
+        rel: targetInfo.rel,
+      });
+      if (previous) return previous;
+
+      const freshTarget = resolveSafeVaultTarget(vault.path, targetInfo.rel, { requiredExt: '.md' });
+      if (!freshTarget.exists) {
+        throw makeError('NOTE_NOT_FOUND', '要移入回收站的笔记 "' + freshTarget.rel + '" 不存在。');
+      }
+      const curStat = await fsp.lstat(freshTarget.abs);
+      if (params.expectedMtimeMs !== undefined && params.expectedMtimeMs !== null && Math.abs(curStat.mtimeMs - Number(params.expectedMtimeMs)) > 1) {
+        throw makeError('WRITE_CONFLICT', '笔记在确认前已被外部修改，已取消移入回收站。');
+      }
+      const trashRel = '.trash/' + freshTarget.rel.replace(/\//g, '__').replace(/\.md$/i, '') + '.' + Date.now() + '-' + crypto.randomBytes(3).toString('hex') + '.md';
+      const trashTarget = resolveSafeVaultTarget(vault.path, trashRel, { requiredExt: '.md', allowProtectedRoot: '.trash' });
+      await ensureSafeParentDirs(vault.path, trashTarget.segments);
+      return commit(async () => {
+        const fh = await fsp.open(trashTarget.abs, 'wx', 0o600);
+        await fh.close();
+        await fsp.rename(freshTarget.abs, trashTarget.abs);
+        invalidateVaultCache(vault.path);
+        return {
+          action: 'moved_to_obsidian_trash',
+          vault: { id: vault.id, name: vault.name, path: vault.path },
+          path: freshTarget.rel,
+          trashFile: trashTarget.rel,
         };
       });
     });
   },
 
   async replace_in_note(params = {}) {
-    return handlers.write_note({ ...params, mode: 'replace-text' });
+    const { vault } = resolveVault(params);
+    const targetInfo = resolveSafeVaultTarget(vault.path, params.path, { requiredExt: '.md' });
+    if (!params.dryRun) assertVaultWritable(vault, targetInfo, params.settings);
+    const lockKey = vault.path + '::' + targetInfo.rel;
+
+    return withWriteLock(lockKey, async () => {
+      const { previous, commit } = await prepareWrite(vault, 'replace_in_note', params.dryRun ? null : params.idempotencyKey, {
+        rel: targetInfo.rel, heading: params.heading, headingPath: params.headingPath, blockId: params.blockId,
+        find: params.find, replace: params.replace, replaceAll: params.replaceAll, expectedCount: params.expectedCount,
+      });
+      if (previous) return previous;
+
+      const freshTarget = resolveSafeVaultTarget(vault.path, targetInfo.rel, { requiredExt: '.md' });
+      if (!freshTarget.exists) {
+        throw makeError('NOTE_NOT_FOUND', '要修改的笔记 "' + freshTarget.rel + '" 不存在。');
+      }
+
+      const readRes = await readStrictUtf8File(freshTarget.abs);
+      let origMtimeMs = params.expectedMtimeMs !== undefined && params.expectedMtimeMs !== null ? Number(params.expectedMtimeMs) : null;
+      if (origMtimeMs === null) origMtimeMs = readRes.stat.mtimeMs;
+      else if (Math.abs(readRes.stat.mtimeMs - origMtimeMs) > 1) {
+        throw makeError('WRITE_CONFLICT', '笔记在预览或读取后已被外部修改，已中止替换。');
+      }
+
+      const parsed = parseFrontmatter(readRes.text);
+      const eol = parsed.eol || '\n';
+      const edit = replaceInBody(parsed.body, params, eol);
+      const editDetails = { matchCount: edit.count, scope: edit.range.type, headingPath: edit.range.path, blockId: edit.range.id };
+      if (params.dryRun) {
+        return { action: 'preview', path: freshTarget.rel, mtimeMs: origMtimeMs, ...editDetails };
+      }
+      if (edit.range.type === 'block') verifyBlockRange(edit.body, edit.range, edit.body.length - parsed.body.length);
+
+      const finalRaw = parsed.rawBlock + edit.body;
+      return commit(async () => {
+        const bytesWritten = await atomicWriteUtf8File(vault.path, freshTarget, finalRaw, {
+          createOnly: false,
+          expectedMtimeMs: origMtimeMs,
+          preserveBom: readRes.hasBom,
+        });
+        invalidateVaultCache(vault.path);
+        const afterStat = await fsp.lstat(freshTarget.abs);
+        return {
+          action: 'replace_in_note',
+          vault: { id: vault.id, name: vault.name, path: vault.path },
+          path: freshTarget.rel,
+          bytesWritten,
+          mtimeMs: afterStat.mtimeMs,
+          frontmatter: parsed.frontmatter,
+          ...editDetails,
+        };
+      });
+    });
   },
 
   async manage_tags(params = {}) {
-    return handlers.write_note({ ...params, mode: 'manage-tags' });
+    const { vault } = resolveVault(params);
+    if (!['list', 'add', 'remove'].includes(params.operation)) {
+      throw makeError('INVALID_TAG_OPERATION', '标签操作必须是 list、add 或 remove。');
+    }
+    const targetInfo = resolveSafeVaultTarget(vault.path, params.path, { requiredExt: '.md' });
+    const tagRead = params.operation === 'list';
+    if (!tagRead) assertVaultWritable(vault, targetInfo, params.settings);
+    const lockKey = vault.path + '::' + targetInfo.rel;
+
+    return withWriteLock(lockKey, async () => {
+      const freshTarget = resolveSafeVaultTarget(vault.path, targetInfo.rel, { requiredExt: '.md' });
+      if (!freshTarget.exists) {
+        throw makeError('NOTE_NOT_FOUND', '要修改的笔记 "' + freshTarget.rel + '" 不存在。');
+      }
+
+      const readRes = await readStrictUtf8File(freshTarget.abs);
+      const parsed = parseFrontmatter(readRes.text);
+      const tagEdit = editNoteTags(parsed, params.operation, params.tags);
+      const tagResult = { tags: tagEdit.tags, applied: tagEdit.applied, skipped: tagEdit.skipped, location: 'frontmatter' };
+      if (!tagEdit.applied.length) {
+        return {
+          action: params.operation,
+          vault: { id: vault.id, name: vault.name, path: vault.path },
+          path: freshTarget.rel,
+          ...tagResult,
+        };
+      }
+
+      const patchedFm = patchFrontmatterPreservingRaw(parsed, tagEdit.patch);
+      const finalRaw = patchedFm.rawBlock + parsed.body;
+      const bytesWritten = await atomicWriteUtf8File(vault.path, freshTarget, finalRaw, {
+        createOnly: false,
+        expectedMtimeMs: readRes.stat.mtimeMs,
+        preserveBom: readRes.hasBom,
+      });
+      invalidateVaultCache(vault.path);
+      const afterStat = await fsp.lstat(freshTarget.abs);
+      return {
+        action: params.operation,
+        vault: { id: vault.id, name: vault.name, path: vault.path },
+        path: freshTarget.rel,
+        bytesWritten,
+        mtimeMs: afterStat.mtimeMs,
+        frontmatter: patchedFm.frontmatter,
+        ...tagResult,
+      };
+    });
+  },
+
+  async list_tags(params = {}) {
+    const { vault } = resolveVault(params);
+    const idx = await scanVaultIndex(vault.path, Boolean(params.refresh));
+    const prefix = typeof params.prefix === 'string' ? params.prefix.trim().replace(/^#+/, '') : '';
+    const prefixLower = prefix.toLowerCase();
+    const limit = Math.trunc(Math.min(Math.max(Number(params.limit) || 50, 1), 200));
+
+    const map = new Map();
+    for (const note of idx.notes) {
+      for (const tag of note.tags) {
+        if (prefixLower) {
+          const lower = tag.toLowerCase();
+          if (lower !== prefixLower && !lower.startsWith(prefixLower + '/')) continue;
+        }
+        if (!map.has(tag)) map.set(tag, []);
+        map.get(tag).push(note.path);
+      }
+    }
+    // Counts come from Obsidian's metadata cache when available (covers files past the scan limit
+    // and matches how Obsidian groups tags); sample notes still come from the local index.
+    const cliTags = await withObsidianCli(vault, (session) => session.tags());
+    let rows;
+    if (cliTags.ok) {
+      const samplesByLower = new Map();
+      for (const [tag, paths] of map) {
+        const lower = tag.toLowerCase();
+        samplesByLower.set(lower, (samplesByLower.get(lower) || []).concat(paths));
+      }
+      rows = cliTags.value
+        .filter(({ tag }) => {
+          if (!prefixLower) return true;
+          const lower = tag.toLowerCase();
+          return lower === prefixLower || lower.startsWith(prefixLower + '/');
+        })
+        .map(({ tag, count }) => [tag, count, samplesByLower.get(tag.toLowerCase()) || []]);
+    } else {
+      rows = Array.from(map.entries()).map(([tag, paths]) => [tag, paths.length, paths]);
+    }
+    const sorted = rows.sort((a, b) => b[1] - a[1] || comparePaths(a[0], b[0]));
+    const tags = sorted.slice(0, limit).map(([tag, count, paths]) => ({
+      tag,
+      count,
+      sampleNotes: paths.slice(0, 5),
+    }));
+    return {
+      vault: { id: vault.id, name: vault.name, path: vault.path },
+      prefix,
+      totalTags: sorted.length,
+      truncated: sorted.length > limit,
+      truncatedScan: cliTags.ok ? false : idx.truncatedScan,
+      tagSource: cliTags.ok ? 'obsidian-cli' : 'filesystem',
+      cliFallbackReason: cliTags.ok ? undefined : cliTags.reason,
+      tags,
+    };
   },
 
   async daily_note(params = {}) {
@@ -2064,7 +2359,26 @@ const handlers = {
     }
 
     const formattedRelStem = formatMomentPattern(targetDate, cfg.format);
-    const relPath = cfg.folder ? cfg.folder + '/' + formattedRelStem + '.md' : formattedRelStem + '.md';
+    let relPath = cfg.folder ? cfg.folder + '/' + formattedRelStem + '.md' : formattedRelStem + '.md';
+    // For today, ask Obsidian where its daily note lives: it applies the user's locale and every
+    // Moment token, which the local formatter only approximates. The CLI only answers for today,
+    // and plugin-level folder/format overrides take precedence over Obsidian's own settings.
+    const hasPluginOverride = ['daily_folder', 'dailyFolder', 'daily_format', 'dailyFormat']
+      .some((key) => typeof settings[key] === 'string' && settings[key].trim());
+    const isToday = formatMomentPattern(targetDate, 'YYYY-MM-DD') === formatMomentPattern(nowRef, 'YYYY-MM-DD');
+    let pathSource = 'daily-notes-config';
+    if (isToday && !hasPluginOverride) {
+      const cliPath = await withObsidianCli(vault, (session) => session.dailyPath());
+      if (cliPath.ok) {
+        try {
+          resolveSafeVaultTarget(vault.path, cliPath.value, { requiredExt: '.md' });
+          relPath = cliPath.value;
+          pathSource = 'obsidian-cli';
+        } catch {
+          // keep the locally formatted path
+        }
+      }
+    }
     const targetInfo = resolveSafeVaultTarget(vault.path, relPath, { requiredExt: '.md' });
     const noteTitle = path.posix.basename(targetInfo.rel, '.md');
     const isoDate = formatMomentPattern(targetDate, 'YYYY-MM-DD');
@@ -2078,12 +2392,13 @@ const handlers = {
           path: targetInfo.rel,
           title: noteTitle,
           date: isoDate,
+          pathSource,
           content: '',
           message: '该日期的日记尚未创建。传 action="ensure" 或 "append" 可自动初始化。',
         };
       }
       const note = await handlers.read_note({ ...params, vault: vault.id, path: targetInfo.rel });
-      return { exists: true, date: isoDate, ...note };
+      return { exists: true, date: isoDate, pathSource, ...note };
     }
 
     assertVaultWritable(vault, targetInfo, params.settings);
@@ -2162,6 +2477,7 @@ const handlers = {
       return {
         exists: true,
         date: isoDate,
+        pathSource,
         updatedAction: writeMeta.action,
         templateWarning: writeMeta.templateWarning || undefined,
         ...updated,
@@ -2170,6 +2486,7 @@ const handlers = {
       return {
         exists: true,
         date: isoDate,
+        pathSource,
         vault: { id: vault.id, name: vault.name, path: vault.path },
         path: targetInfo.rel,
         title: noteTitle,
@@ -2184,6 +2501,13 @@ const handlers = {
     const idx = await scanVaultIndex(vault.path, Boolean(params.refresh));
     const mode = params.mode || 'note';
     const limit = Math.min(Math.max(Number(params.limit) || 25, 1), 100);
+
+    if (mode === 'tags') {
+      throw makeError('USE_LIST_TAGS', '全库标签统计已独立为 list_tags 工具，请改用 list_tags。');
+    }
+    if (!['note', 'hubs', 'orphans'].includes(mode)) {
+      throw makeError('INVALID_GRAPH_MODE', '不支持的图谱模式 "' + mode + '"（可选 note / hubs / orphans）。');
+    }
 
     if (mode === 'orphans') {
       const orphans = idx.notes
@@ -2205,21 +2529,6 @@ const handlers = {
       return { vault: { id: vault.id, name: vault.name, path: vault.path }, mode, hubs };
     }
 
-    if (mode === 'tags') {
-      const map = new Map();
-      for (const n of idx.notes) {
-        for (const t of n.tags) {
-          if (!map.has(t)) map.set(t, []);
-          map.get(t).push(n.path);
-        }
-      }
-      const tags = Array.from(map.entries())
-        .sort((a, b) => b[1].length - a[1].length)
-        .slice(0, limit)
-        .map(([tag, paths]) => ({ tag, count: paths.length, sampleNotes: paths.slice(0, 5) }));
-      return { vault: { id: vault.id, name: vault.name, path: vault.path }, mode, tags };
-    }
-
     let note = null;
     if (typeof params.path === 'string' && params.path.trim()) {
       const clean = normalizeRelPath(params.path, '.md').toLowerCase();
@@ -2231,14 +2540,14 @@ const handlers = {
       }
       note = resolved.note;
     } else {
-      throw makeError('MISSING_NOTE_TARGET', '查询单篇笔记图谱关系时请提供 path 或 title；或将 mode 设为 "hubs" / "orphans" / "tags"。');
+      throw makeError('MISSING_NOTE_TARGET', '查询单篇笔记图谱关系时请提供 path 或 title；或将 mode 设为 "hubs" / "orphans"。');
     }
     if (!note) {
       throw makeError('NOTE_NOT_FOUND', '未找到目标笔记。');
     }
 
-    const backlinks = idx.backlinksMap.get(note.path) || [];
-    const outlinks = [...note.wikilinks.map((w) => ({ ...w, embed: false })), ...note.embeds.map((e) => ({ ...e, embed: true }))].map((wl) => {
+    let backlinks = idx.backlinksMap.get(note.path) || [];
+    let outlinks = [...note.wikilinks.map((w) => ({ ...w, embed: false })), ...note.embeds.map((e) => ({ ...e, embed: true }))].map((wl) => {
       const { note: rNote, ambiguous } = idx.resolveLinkTarget(wl.target, note.folder);
       return {
         target: wl.target,
@@ -2246,8 +2555,38 @@ const handlers = {
         resolvedPath: rNote ? rNote.path : null,
         exists: Boolean(rNote),
         ambiguousPaths: ambiguous.length > 1 ? ambiguous : undefined,
+        heading: wl.heading,
+        alias: wl.alias,
       };
     });
+
+    // Obsidian's own link resolution is authoritative when the app can answer.
+    const cliLinks = await withObsidianCli(vault, async (session) => ({
+      backlinks: await session.backlinks(note.path),
+      links: await session.links(note.path),
+    }));
+    let linkSource = 'filesystem';
+    if (cliLinks.ok) {
+      linkSource = 'obsidian-cli';
+      const indexed = new Map(backlinks.map((b) => [b.path, b]));
+      backlinks = cliLinks.value.backlinks.map((p) => indexed.get(p) || {
+        path: p,
+        title: path.posix.basename(p).replace(/\.md$/i, ''),
+      });
+      const unresolved = new Set(cliLinks.value.links.unresolved.map((name) => name.toLowerCase()));
+      const resolved = cliLinks.value.links.resolved;
+      outlinks = outlinks.map((o) => {
+        const key = String(o.target || '').trim().replace(/\\/g, '/').replace(/^\/+/, '').toLowerCase();
+        if (unresolved.has(key)) return { ...o, resolvedPath: null, exists: false, ambiguousPaths: undefined };
+        const matches = resolved.filter((p) => {
+          const lower = p.toLowerCase();
+          const stem = lower.replace(/\.md$/, '');
+          return lower === key || stem === key || stem.endsWith('/' + key) || lower.endsWith('/' + key);
+        });
+        if (matches.length === 1) return { ...o, resolvedPath: matches[0], exists: true, ambiguousPaths: undefined };
+        return o;
+      });
+    }
 
     const linkedSet = new Set([note.path, ...backlinks.map((b) => b.path), ...outlinks.map((o) => o.resolvedPath).filter(Boolean)]);
     const titleLower = note.title.toLowerCase();
@@ -2285,6 +2624,8 @@ const handlers = {
     return {
       vault: { id: vault.id, name: vault.name, path: vault.path },
       note: { path: note.path, title: note.title, tags: note.tags },
+      linkSource,
+      cliFallbackReason: cliLinks.ok ? undefined : cliLinks.reason,
       outlinks,
       backlinks,
       unlinkedMentions,
@@ -2338,8 +2679,8 @@ const handlers = {
       };
     }
 
-    // Explicit non-destructive modes: create (no overwrite), upsert (merge by id preserving unknown fields!), overwrite (requires confirmation upstream)
-    const normalizedAction = action === 'write' ? (targetInfo.exists ? 'upsert' : 'create') : action;
+    // Explicit non-destructive modes: create (no overwrite), upsert (create if missing, or merge by id preserving unknown fields), overwrite (requires confirmation upstream)
+    const normalizedAction = action;
     if (!['create', 'upsert', 'overwrite'].includes(normalizedAction)) {
       throw makeError('INVALID_CANVAS_ACTION', '不支持的 canvas action "' + action + '"（可选 list / read / create / upsert / overwrite）。');
     }
@@ -2502,8 +2843,7 @@ const handlers = {
   },
 
   async open_in_obsidian(params = {}) {
-    const { vault, vaults } = resolveVault(params);
-    const cli = await detectObsidianCli();
+    const { vault } = resolveVault(params);
     let relPath = '';
     let absTarget = vault.path;
 
@@ -2519,14 +2859,13 @@ const handlers = {
       absTarget = checked.abs;
     }
 
-    const uniqueName = !vaults.some((item) => item.id !== vault.id && item.exists && item.name.toLowerCase() === vault.name.toLowerCase());
-    if (cli.running && cli.cliEnabled && cli.binary && relPath && vault.source === 'obsidian' && uniqueName) {
-      try {
-        await execFileAsync(cli.binary, ['vault=' + vault.name, 'open', 'path=' + relPath], { timeout: 3000 });
+    if (relPath) {
+      // The session targets the vault by ID and confirms its folder, so same-named vaults are safe.
+      const opened = await withObsidianCli(vault, (session) => session.open(relPath));
+      if (opened.ok) {
         return { launchRequested: true, method: 'obsidian-cli', vault: { id: vault.id, name: vault.name }, path: relPath };
-      } catch {
-        // fallback to obsidian:// path URI
       }
+      // otherwise fall back to the obsidian:// path URI
     }
 
     // Use full path URI (obsidian://open?path=...) when registered by path to avoid duplicate vault name ambiguity!
@@ -2548,6 +2887,76 @@ const handlers = {
       vault: { id: vault.id, name: vault.name },
       path: relPath || null,
     };
+  },
+
+  async check_folder(params = {}) {
+    const folder = relativeFolder(typeof params.folder === 'string' ? params.folder.trim() : null);
+    if (!folder) throw makeError('INVALID_FOLDER', '请输入知识库内的子目录，例如 伙伴/小助手。');
+    if (folder.length > 240) throw makeError('INVALID_FOLDER', '目录路径过长。');
+    return { folder };
+  },
+
+  // Saves a whole Markdown text as a new note in folder, choosing a free file name.
+  async capture_note(params = {}) {
+    const { vault } = resolveVault(params);
+    const content = typeof params.content === 'string' ? params.content : '';
+    if (!content.trim()) throw makeError('EMPTY_CONTENT', '没有可保存的正文。');
+    const folder = relativeFolder(typeof params.folder === 'string' ? params.folder.trim() : '');
+    const key = typeof params.idempotencyKey === 'string' ? params.idempotencyKey.trim() : '';
+    const vaultInfo = { id: vault.id, name: vault.name, path: vault.path };
+    if (key) {
+      // A repeated request returns the note it already created instead of a second copy.
+      const receipt = await getWriteReceipt(vault, 'write_note', key);
+      if (receipt.state === 'saved') return { action: 'already-saved', vault: vaultInfo, path: receipt.path, replayed: true };
+      if (receipt.state === 'unconfirmed') {
+        throw makeError('WRITE_OUTCOME_UNKNOWN', '无法确认上次保存是否完成。请先在知识库中核对' + (receipt.path ? '「' + receipt.path + '」' : '目标笔记') + '，避免重复保存。');
+      }
+    }
+    const fallback = safeFileStem(params.fallbackTitle, 'Cindy ' + formatMomentPattern(new Date(), 'YYYY-MM-DD HHmm'));
+    const stem = safeFileStem(params.title || noteTitleFromMarkdown(content), fallback);
+    for (let attempt = 1; attempt <= 50; attempt++) {
+      const rel = (folder ? folder + '/' : '') + stem + (attempt > 1 ? ' ' + attempt : '') + '.md';
+      if (resolveSafeVaultTarget(vault.path, rel, { requiredExt: '.md' }).exists) continue;
+      try {
+        return await handlers.write_note({
+          vault: vault.id,
+          settings: params.settings,
+          path: rel,
+          mode: 'create',
+          content,
+          ...(params.frontmatter ? { frontmatter: params.frontmatter } : {}),
+          ...(key ? { idempotencyKey: key } : {}),
+        });
+      } catch (err) {
+        if (err?.code !== 'NOTE_ALREADY_EXISTS') throw err;
+      }
+    }
+    throw makeError('NO_FREE_NOTE_NAME', '目录「' + (folder || '/') + '」中已有太多同名笔记，请换个标题。');
+  },
+
+  async inspect_markdown_file(params = {}) {
+    return inspectExternalMarkdown(params);
+  },
+
+  async import_markdown_file(params = {}) {
+    const info = await inspectExternalMarkdown(params);
+    if (info.insideVault) throw makeError('ALREADY_IN_VAULT', '这个文件已在知识库「' + info.insideVault.name + '」中。');
+    const { text } = await readStrictUtf8File(params.file);
+    return handlers.capture_note({
+      vault: params.vault,
+      settings: params.settings,
+      folder: params.folder,
+      title: typeof params.name === 'string' && params.name.trim() ? params.name : info.stem,
+      fallbackTitle: info.stem,
+      content: text,
+      idempotencyKey: params.idempotencyKey,
+    });
+  },
+
+  async open_with_default_app(params = {}) {
+    await inspectExternalMarkdown(params);
+    await openWithDefaultApp(params.file);
+    return { opened: true };
   },
 
   async complete_notes(params = {}) {

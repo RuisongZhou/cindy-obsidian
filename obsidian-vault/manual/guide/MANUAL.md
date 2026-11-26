@@ -1,46 +1,55 @@
 # Obsidian 知识库插件编排手册
 
-插件通过本机 Markdown 索引读写 Obsidian 知识库。需要把结果打开到 Obsidian 桌面端时，使用 `open_in_obsidian`。
+插件通过本机 Markdown 索引直接读写已登记的 Obsidian 知识库，无需启动 Obsidian。
 
-## 1. 安全边界与数据无损原则
+## 1. 工具选用速查表（一件事一个首选入口）
 
-1. **仅限已登记 Vault 访问**。工具操作 `obsidian.json` 中已注册或用户在工作台「添加知识库」亲选的目录。普通笔记操作会拦截受保护目录和符号链接。用户从工作台切换知识库时，聊天工具仍使用插件设置中的默认库。用户明确提到另一库时，传其 ID 或精确路径。
-2. **未知库结构时先看概览**：首次操作某 Vault 时，先调用 `vault_status` 获取知识库 ID、默认 `inboxFolder`、高频 `#标签`、日记配置及最近编辑列表。
-3. **非破坏性编辑保证**：
-   - 正文追加（`append` / `prepend`）与章节编辑（`append-heading` / `prepend-heading` / `replace-section`）会自动识别 ``` 与 ~~~ 代码围栏（绝不会误切代码块里的 `#` 注释），并在未传 `frontmatter`/`tags` 时逐字节保留原有 YAML Frontmatter；
-   - `replace-section` 替换目标标题行之后直到下一个同级或更高级标题之前的内容（包含其下级子标题），若存在同名章节可使用 `headingPath` 按父标题消歧；
-   - 整篇覆盖（`overwrite`）、移入回收站（`delete`）以及白板整板覆盖（`canvas_ops` 的 `overwrite`）会先核验真实目标并弹出 Cindy 宿主确认框，用户取消时请尊重取消结果。
+| 任务意图 | 首选工具 | 说明与边界 |
+| :--- | :--- | :--- |
+| 摸底知识库、查写入规则/收件箱/日记配置 | `vault_status` | 首次进库先调用，返回 `writePolicy`、统计摘要与近期修改笔记 |
+| 按文件夹浏览目录树或非 `.md` 文件 | `list_files` | 仅扫目录元数据，支持 `folder`/`depth`/`extension` |
+| 按关键词、目录、标签或属性检索笔记 | `search_notes` | 返回相关性排序、游标 `nextCursor` 及正文命中行列 |
+| 统计全库所有标签与使用频次 | `list_tags` | 覆盖 Frontmatter 与正文 `#标签`，支持 `prefix` 前缀过滤 |
+| 读取单篇笔记、指定章节或 `^块ID` | `read_note` | 同时返回 `frontmatter`、`tags`、`headings[].path`、直接出链与反链 |
+| 新建、整篇覆盖、追加/前置、整节/整块改写、改非标签属性 | `write_note` | 覆盖已有笔记需用户确认；**不用于删除或修改已有笔记标签** |
+| 在已有正文、章节或块中精确字面替换片段 | `replace_in_note` | 保留 Frontmatter，默认唯一命中，支持 `dryRun` 与 `expectedMtimeMs` |
+| 将已有笔记移入知识库回收站（`.trash`） | `delete_note` | 安全移入 `.trash`，执行前需 Cindy 弹窗确认 |
+| 查看、添加或移除单篇笔记的 Frontmatter 标签 | `manage_tags` | 完整标签名大小写不敏感匹配，不误删子标签，保留正文与其他属性 |
+| 读写或向每日日记追加时间戳记录/待办 | `daily_note` | 自动遵循 `.obsidian/daily-notes.json` 或插件设置的目录、日期格式与模板 |
+| 查未连接提及、二跳关联、全库核心枢纽或孤立笔记 | `graph_links` | 仅 `note` / `hubs` / `orphans` 三种纯图谱模式 |
+| 列出、读取、新建、合并或替换 `.canvas` 白板 | `canvas_ops` | 仅 `list` / `read` / `create` / `upsert` / `overwrite`；`overwrite` 需确认 |
+| 在桌面端 Obsidian 应用打开文件或知识库 | `open_in_obsidian` | 库已在 Obsidian 中打开且官方 CLI 可用时用 CLI，否则精确路径 `obsidian://` URI |
+| 在 Cindy 内打开可视化交互工作台 | `open_workbench` | 用于让用户图形化浏览、保存笔记、记录日记或调整写入规则 |
 
-## 2. 常见多工具协作流程
+内部专用工具：`complete_notes`、`pick_vault_dir`、`write_receipt`、`set_vault_write_policy` 仅供宿主 `@` 补全与工作台页面调用（`visibility: ["app"]`），模型日常任务无需也不应调用。
 
-### A. 回答基于个人知识库的问题
-1. `search_notes` 用 1–3 个核心词定位候选笔记；
-2. 对排名前列的笔记传精确 `path` 调用 `read_note`（长文可传 `heading` 只读相关章节）；
-3. 若涉及脉络梳理，调用 `graph_links` 查看 `backlinks`、`unlinkedMentions` 与二跳关联笔记补充背景；
-4. 在回复中标明引用的笔记路径或 `[[笔记名]]`。
+## 2. 安全边界与数据无损原则
 
-需要列出具体目录时，调用 `list_notes`。`depth: 1` 返回直接子项，`extension: "md"` 只过滤文件，目录仍返回。`truncated` 表示因扫描上限或不可读目录而未列全。
+0. **官方 CLI 只用于查询**：Obsidian 正在运行、已开启命令行界面且该库已打开时，`graph_links` 的反向链接与链接解析、`list_tags` 的计数、`daily_note` 的今日路径改由 Obsidian 回答，结果分别带 `linkSource` / `tagSource` / `pathSource`（`obsidian-cli` 或本地来源）；CLI 不可用时自动退回本地索引并在 `cliFallbackReason` 说明原因。所有写入都直接写文件，不经过 CLI（CLI 会把正文中的 `\n`、`\t` 改成换行和制表符）。`vault_status.obsidianCli.activeVaultQueries` 显示当前库能否使用 CLI。
 
-需要遍历搜索结果时，原样传回 `nextCursor`，保持知识库、查询、筛选和分页参数一致。`STALE_CURSOR` 表示需要从第一页重搜。`truncatedScan` 和 `partialBodyIndex` 描述索引覆盖范围，`matchesTruncated` 描述单篇正文命中是否达到返回上限。
+1. **仅限已登记 Vault 访问**：工具只访问 `obsidian.json` 中已注册或用户在工作台「添加知识库」亲选的目录，拦截 `.obsidian`/`.git`/`.trash` 与符号链接。用户明确指定另一库时，传其 ID 或精确路径。
+2. **尊重按库写入规则**：`vault_status` 返回当前库的 `writePolicy`。`readOnly: true` 禁止所有写入与移入回收站；`writeFolders: null` 表示全库可写，空数组表示全库禁写，目录数组只允许对应目录及子目录。遇到 `VAULT_READ_ONLY` 或 `WRITE_OUTSIDE_ALLOWED_FOLDERS` 时如实向用户报告，不要绕过。
+3. **伙伴专属文件夹**：在伙伴的主对话中，`vault_status` 返回 `summary.companion` 与 `summary.defaultFolder`。`write_note` 的 `create` 若只给文件名或路径在收件箱下，会自动放进该伙伴的文件夹，结果带 `redirectedFrom`；明确写了其他目录时保持原路径。其他写入模式不改路径。伙伴文件夹由用户在工作台「伙伴专属文件夹」中设置，模型无需也不能自行传入。
+4. **非破坏性编辑与确认弹窗**：
+   - `write_note` 的追加、前置与章节编辑自动识别 ``` 与 ~~~ 代码围栏，绝不误切代码块内的 `#` 注释，并在未传 `frontmatter` 时逐字节保留原 YAML Frontmatter；
+   - `write_note(mode="overwrite")`、`delete_note` 以及 `canvas_ops(action="overwrite")` 会先核验真实目标并弹出 Cindy 确认框；用户取消时请尊重取消结果。
 
-`matches` 的 `line` 和 `column` 从 1 开始，相对于去掉 YAML Frontmatter 的 Markdown 正文。`start`、`end` 为 UTF-16 零基偏移，`end` 不含在内。`body.slice(start, end)` 应等于 `text`。只命中标题、别名或其他元数据时，正文命中数组可能为空。
+## 3. 常见多工具协作流程
 
-### 精确编辑标题、块和文本
+### A. 检索与回答知识库问题
+1. 首次了解目录或文件类型时调用 `list_files`（`depth: 1` 列直接子项，`extension` 只过滤文件不隐藏子目录；`truncated` 表示未列全）。
+2. 用 `search_notes` 检索 1–3 个核心词；需要翻页时原样传回 `nextCursor` 并保持查询与分页参数一致，遇到 `STALE_CURSOR` 从第一页重搜。`matches` 的 `line`/`column` 为去掉 YAML Frontmatter 后正文的 1 基位置，`start`/`end` 为 UTF-16 零基偏移。
+3. 对高相关结果传精确 `path` 调用 `read_note`（长文可传 `heading` / `headingPath` / `blockId`）。
+4. 若需梳理脉络、找未连接提及或二跳关联，再调用 `graph_links`；需要了解全库标签体系时调用 `list_tags`。
+5. 回复中清晰标注引用的笔记路径或 `[[笔记名]]`。
 
-- `read_note` 的 `headings[].path` 是从文档根标题到目标标题的数组。读取或写入重名章节时，把该数组传给 `headingPath`。完整路径缺失或仍重复时，先请用户核对目标。`heading` 仍适用于唯一标题或可通过井号层级区分的旧调用。
-- 读块可用 `path` 加 `blockId`，或将 `[[笔记#^块ID]]` 传给 `title`。块编辑可用 `append-block`、`prepend-block` 和 `replace-block`。修改限于能安全定位的块，保留原标记。围栏代码中的模拟 ID、重复 ID 或会改变引用边界的写入会被拒绝。
-- `replace_in_note` 的 `heading`、`headingPath`、`blockId` 最多指定一项。省略时查找整篇正文，Frontmatter 不参与。`find` 按字面及大小写匹配。写入前可以 `dryRun: true` 获取 `matchCount` 和 `mtimeMs`。唯一匹配时可直接替换。确需多个匹配时使用 `replaceAll: true`，并可同时传 `expectedCount` 和 `expectedMtimeMs`。
+### B. 精准编辑章节、块、局部文本与标签
+- **重名标题**：先看 `read_note` 返回的 `headings[].path`，读写重名章节时将其传给 `headingPath`；`heading` 适用于唯一标题或不存在时自动新建二级标题的场景。
+- **块读写**：读块传 `path` + `blockId`（或用 `title: "[[笔记#^块ID]]"`）；写块用 `write_note` 的 `append-block` / `prepend-block` / `replace-block`，保留原块 ID，拒绝重复 ID、代码围栏伪 ID 或会破坏块边界的写入。
+- **字面替换**：优先用 `replace_in_note`（`heading`/`headingPath`/`blockId` 最多指定一项，Frontmatter 不参与）。建议先 `dryRun: true` 核对 `matchCount` 与 `mtimeMs`，写入时传入 `expectedMtimeMs`；确需批量替换时显式传 `replaceAll: true` 与 `expectedCount`。
+- **标签管理**：新建或整篇覆盖笔记时可在 `write_note` 的 `frontmatter.tags` 初始化标签；对已有笔记查看、添加或移除 Frontmatter 标签一律使用 `manage_tags({ path, operation, tags })`（忽略大小写与 Unicode 规范形式，区分父子标签，复杂或带注释的标签属性会安全拒绝）。
 
-### 写入范围与标签
-
-- `vault_status` 返回当前库的 `writePolicy`。`readOnly` 为真时禁止写入。`writeFolders: null` 表示全库，空数组表示禁止全部写入，目录数组允许对应目录及其子目录。用户可从工作台保存规则。遇到 `VAULT_READ_ONLY` 或 `WRITE_OUTSIDE_ALLOWED_FOLDERS` 时，报告限制并尊重用户配置。
-- 用 `manage_tags({ path, operation, tags })` 处理笔记的 Frontmatter 标签。`list` 仅读取，`add` 或 `remove` 接受完整标签名，可带一个 `#`。结果包含 `tags`、`applied`、`skipped`。匹配忽略大小写和 Unicode 规范形式，仍区分父标签和子标签。正文与其他属性保留，复杂或有歧义的标签属性会拒绝修改。
-
-### B. 构建或更新思维白板 (`.canvas`)
+### C. 构建或更新思维白板（`.canvas`）
 1. 先用 `search_notes` 确认要引用的库内笔记精确路径；
-2. 新建白板用 `canvas_ops({ action: "create", path: "主题白板.canvas", nodes, edges })`；向已有白板增改节点用 `action: "upsert"`（按 `id` 无损合并，保留 `group`、`subpath`、`fromEnd`/`toEnd` 等所有既有属性）；
-3. 可选调用 `open_in_obsidian` 让用户在桌面端直接查看。
-
-### C. 交互式工作台说明
-- 用户口头要求「打开 Obsidian 面板 / 预览笔记界面」时，模型应调用 `open_workbench` 工具；
-- `complete_notes` 与 `pick_vault_dir` 仅供宿主 `@` 输入补全与工作台页面内部调用，模型日常读写无需调用它们。
+2. 新建白板用 `canvas_ops({ action: "create", path, nodes, edges })`；向已有白板增删改节点或不确定是否存在时用 `action: "upsert"`（按 `id` 无损合并，保留既有 `group`、`subpath`、`fromEnd`/`toEnd` 等扩展字段）；仅在需要整板重写时使用 `overwrite`（会弹确认框）；
+3. 可选调用 `open_in_obsidian` 在桌面端直接打开查看。

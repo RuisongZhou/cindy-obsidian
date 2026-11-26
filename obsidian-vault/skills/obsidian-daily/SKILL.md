@@ -1,6 +1,6 @@
 ---
 name: obsidian-daily
-description: 读取、汇总或更新 Obsidian 今日日记（Daily Note），支持早间待办梳理、晚间工作复盘以及将近期新增笔记关联进今日记录。
+description: 查看、汇总或更新 Obsidian 今日日记（Daily Note），支持早间待办梳理、随时速记和晚间工作复盘。
 ---
 
 # Obsidian 每日日记与回顾 (`/obsidian-daily`)

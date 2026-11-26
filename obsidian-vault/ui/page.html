@@ -152,6 +152,18 @@ textarea { min-height: 120px; resize: vertical; line-height: 1.5; }
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+.companion-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-wrap: wrap;
+  padding: 8px 0;
+  border-top: 1px solid var(--color-border-primary, rgba(128,128,128,0.18));
+}
+.companion-row:first-child { border-top: 0; }
+.companion-name { flex: 1 1 8rem; font-weight: 600; overflow-wrap: anywhere; }
+.companion-row input { flex: 2 1 12rem; padding: 6px 8px; }
+.companion-row button { padding: 5px 9px; }
 .hidden { display: none !important; }
 </style>
 </head>
@@ -212,6 +224,13 @@ textarea { min-height: 120px; resize: vertical; line-height: 1.5; }
       <button id="btn-save-policy" type="submit" data-en="Save write rules">保存规则</button>
     </form>
   </details>
+  <details id="companion-settings">
+    <summary data-en="Partner folders">伙伴专属文件夹</summary>
+    <div class="card">
+      <p id="companion-help" class="help"></p>
+      <div id="companion-list"></div>
+    </div>
+  </details>
   <div class="action-bar">
     <button id="btn-folders" type="button" data-en="Browse folders">浏览目录</button>
     <button id="btn-parent" class="hidden" type="button" data-en="Up one level">返回上级</button>
@@ -244,7 +263,11 @@ textarea { min-height: 120px; resize: vertical; line-height: 1.5; }
 <section id="panel-capture" class="hidden">
   <div id="save-receipt" class="card hidden">
     <p id="saved-path" class="help"></p>
-    <button id="btn-view-saved" type="button" data-en="View saved note">查看已保存的笔记</button>
+    <div class="action-bar">
+      <button id="btn-view-saved" type="button" data-en="View saved note">查看已保存的笔记</button>
+      <button id="btn-open-saved" type="button" data-en="Open in Obsidian">在 Obsidian 中打开</button>
+      <button id="btn-edit-reply" class="hidden" type="button" data-en="Edit and save again">修改后另存</button>
+    </div>
   </div>
   <form id="capture-form" class="card">
     <p id="capture-target" class="help"></p>
@@ -297,7 +320,7 @@ textarea { min-height: 120px; resize: vertical; line-height: 1.5; }
 <script type="module">
 import { App } from '@modelcontextprotocol/ext-apps';
 
-const app = new App({ name: 'Obsidian Vault', version: '1.5.0' }, {}, { autoResize: true });
+const app = new App({ name: 'Obsidian Vault', version: '1.1.3' }, {}, { autoResize: true });
 const $ = (selector) => document.querySelector(selector);
 const controller = new AbortController();
 const themeVariable = /^--(?:color|font|border|radius|shadow|spacing|surface|text|bg)-[a-z0-9-]+$/i;
@@ -332,8 +355,14 @@ let pendingWrite = null;
 let recoveryState = '';
 let policyPending = false;
 let writePolicy = { readOnly: false, writeFolders: null };
+let companion = null;
+let companionLookup = '';
+let companionsLoading = false;
+let autoFilledPath = '';
+let replySave = { key: '', state: '' };
 
 const ui = (zh, en) => chinese ? zh : en;
+const defaultFolder = () => companion?.folder || inbox;
 const setStatus = (message = '') => { $('#status').textContent = message; };
 
 function syncHostContext() {
@@ -382,6 +411,8 @@ function syncHostContext() {
     }
   }
   updateControls();
+  void autoSaveReply();
+  void loadCompanion();
 }
 
 function isReplyCapture(ctx) {
@@ -408,14 +439,19 @@ function contextText(preferMessage = false) {
 }
 
 function updateTarget() {
-  $('#capture-target').textContent = vault ? ui('保存到「' + vault.name + '」', 'Save to ' + vault.name) + writePolicyLabel() : '';
+  const partner = companion?.folder
+    ? ui(' · 伙伴「' + companion.name + '」的文件夹 ' + companion.folder, ' · ' + companion.name + '’s folder ' + companion.folder)
+    : '';
+  $('#capture-target').textContent = vault ? ui('保存到「' + vault.name + '」', 'Save to ' + vault.name) + partner + writePolicyLabel() : '';
   const path = $('#cap-path');
-  path.placeholder = inbox + '/Note.md';
-  if (!vault || activeTab !== 'capture' || path.value.trim()) return;
+  path.placeholder = defaultFolder() + '/Note.md';
+  // Refill only a path this page filled in, so a partner folder found later replaces the inbox default.
+  if (!vault || activeTab !== 'capture' || (path.value.trim() && path.value !== autoFilledPath)) return;
   const title = app.getHostContext()?.cindy?.context?.task?.title ?? '';
   const stem = title.replace(/[\\/:*?"<>|]/g, '-').replace(/\s+/g, ' ').trim().slice(0, 80);
   const fallback = ui('笔记', 'Note') + (localDate ? '-' + localDate : '');
-  path.value = inbox + '/' + (stem || fallback) + '.md';
+  path.value = defaultFolder() + '/' + (stem || fallback) + '.md';
+  autoFilledPath = path.value;
 }
 
 function writePolicyLabel() {
@@ -453,6 +489,12 @@ function updateControls() {
       : ui('Cindy 尚未提供这条回复的正文。可以返回原文重试，或复制正文后粘贴到这里。', 'Cindy has not provided this reply. Return to the original to retry, or copy and paste the reply here.');
     $('#btn-fill-context').textContent = ui('重新填入这条回复', 'Restore this reply');
   }
+  // Under a reply the form appears only after an automatic save fails or the user chooses to edit.
+  const autoSaving = replyCapture && ['', 'waiting', 'saving', 'saved'].includes(replySave.state) && Boolean(text);
+  $('#capture-form').classList.toggle('hidden', autoSaving);
+  $('#btn-edit-reply').classList.toggle('hidden', !replyCapture || replySave.state !== 'saved');
+  $('#btn-view-saved').classList.toggle('hidden', replyCapture);
+  $('#btn-open-saved').disabled = !ready || !savedNote;
   $('#vault-select').disabled = !initialized || switching || !statusPayload?.vaults?.some((item) => item.exists);
   $('#btn-refresh').disabled = !initialized || switching;
   $('#btn-pick-vault').disabled = !initialized || switching;
@@ -605,6 +647,7 @@ async function clearSavedInput(field, write) {
 }
 
 async function finishWrite(write, result) {
+  let tagSyncError = null;
   if (write.method === 'write_note' && vault?.id === write.vault) {
     replyEdited = true;
     await clearSavedInput($('#cap-content'), write);
@@ -612,6 +655,14 @@ async function finishWrite(write, result) {
     savedNote = { vault: { id: write.vault, name: write.vaultName }, path: result.path };
     $('#saved-path').textContent = write.vaultName + ' / ' + result.path;
     $('#save-receipt').classList.remove('hidden');
+    if (write.pendingTags?.length) {
+      try {
+        await callTool('manage_tags', { vault: write.vault, path: result.path, operation: 'add', tags: write.pendingTags });
+      } catch (error) {
+        tagSyncError = error;
+      }
+      if (controller.signal.aborted) return;
+    }
   }
   if (write.method === 'daily_note' && vault?.id === write.vault) {
     await clearSavedInput($('#daily-input'), write);
@@ -619,9 +670,16 @@ async function finishWrite(write, result) {
     if (result.exists) renderDaily(result);
     else if (activeTab === 'daily') void loadDaily(true);
   }
-  setStatus(result.templateWarning
-    ? ui('日记已保存，模板无法读取，已用默认标题创建。', 'Daily note saved with a default heading because the template could not be read.')
-    : ui('已保存：' + result.path, 'Saved: ' + result.path));
+  if (tagSyncError) {
+    setStatus(ui(
+      '正文已保存：' + result.path + '，但标签未写入（' + (tagSyncError.message || '请检查标签格式') + '）。',
+      'Note saved (' + result.path + '), but tags could not be updated. Check tag names and try again.'
+    ));
+  } else {
+    setStatus(result.templateWarning
+      ? ui('日记已保存，模板无法读取，已用默认标题创建。', 'Daily note saved with a default heading because the template could not be read.')
+      : ui('已保存：' + result.path, 'Saved: ' + result.path));
+  }
   await clearPendingWrite();
 }
 
@@ -688,8 +746,182 @@ async function sendWrite(write) {
   }
 }
 
-function startWrite(method, target, args, input) {
-  return sendWrite({ key: crypto.randomUUID(), method, vault: vault.id, vaultName: vault.name, target, args, input });
+function startWrite(method, target, args, input, extra = {}) {
+  return sendWrite({ key: crypto.randomUUID(), method, vault: vault.id, vaultName: vault.name, target, args, input, ...extra });
+}
+
+function showSavedNote(saved, message) {
+  savedNote = saved;
+  $('#saved-path').textContent = saved.vault.name + ' / ' + saved.path;
+  $('#save-receipt').classList.remove('hidden');
+  setStatus(message);
+}
+
+// Choosing "Save to Obsidian" under a reply saves it at once. The request ID comes from the reply
+// itself, so showing the view again for the same reply returns the existing note instead of a copy.
+async function autoSaveReply() {
+  const ctx = app.getHostContext()?.cindy;
+  if (!isReplyCapture(ctx) || !connectionReady || !vault || statusPending || writePending || pendingWrite ||
+      !['', 'waiting'].includes(replySave.state)) return;
+  const message = ctx?.context?.message;
+  const text = replyText(message);
+  if (!text) return;
+  if (message?.isStreaming) {
+    replySave.state = 'waiting';
+    setStatus(ui('回复完成后会自动保存…', 'The reply will be saved when it finishes…'));
+    updateControls();
+    return;
+  }
+  if (writePolicy.readOnly || writePolicy.writeFolders?.length === 0) {
+    replySave.state = 'failed';
+    setStatus(ui('这个知识库不允许写入，可以换一个知识库后手动保存。', 'This vault does not allow writes. Choose another vault and save manually.'));
+    updateControls();
+    return;
+  }
+  const sessionId = ctx?.source?.sessionId || '';
+  const digest = await hashInput(sessionId + '\n' + (message?.clientId || '') + '\n' + text);
+  if (!['', 'waiting'].includes(replySave.state) || controller.signal.aborted) return;
+  if (!digest) {
+    replySave.state = 'failed';
+    updateControls();
+    return;
+  }
+  replySave = { key: 'reply-' + digest.slice(0, 48), state: 'saving' };
+  const saveVault = vault;
+  writePending = true;
+  updateControls();
+  setStatus(ui('正在保存这条回复…', 'Saving this reply…'));
+  try {
+    const result = await callTool('capture_reply', {
+      content: text,
+      vault: saveVault.id,
+      idempotencyKey: replySave.key,
+      ...(sessionId ? { sessionId } : {}),
+    });
+    if (controller.signal.aborted) return;
+    if (result.companion?.folder) companion = result.companion;
+    replySave.state = 'saved';
+    replyEdited = false;
+    showSavedNote({ vault: { id: result.vault?.id || saveVault.id, name: result.vault?.name || saveVault.name }, path: result.path },
+      result.replayed
+        ? ui('这条回复之前已保存过，没有重复保存。', 'This reply was already saved, so no copy was made.')
+        : ui('已保存：' + result.path, 'Saved: ' + result.path));
+  } catch (error) {
+    if (controller.signal.aborted) return;
+    replySave.state = 'failed';
+    reportError(error, '没能自动保存。可以检查下面的内容后手动保存。', 'The reply was not saved automatically. Review it below and save it manually.');
+  } finally {
+    writePending = false;
+    if (!controller.signal.aborted) {
+      updateTarget();
+      updateControls();
+    }
+  }
+}
+
+async function loadCompanion() {
+  const ctx = app.getHostContext()?.cindy;
+  const sessionId = ctx?.source?.sessionId;
+  if (!sessionId || isReplyCapture(ctx) || companionLookup === sessionId || !connectionReady) return;
+  companionLookup = sessionId;
+  try {
+    const data = await callTool('companion_folders', { sessionId }, 20000);
+    if (data.current?.folder) companion = data.current;
+  } catch {
+    // Without a partner the inbox stays the default folder.
+  }
+  if (!controller.signal.aborted) {
+    updateTarget();
+    updateControls();
+  }
+}
+
+function renderCompanions(data) {
+  const help = $('#companion-help');
+  const list = $('#companion-list');
+  list.replaceChildren();
+  if (data.error === 'PERMISSION_DENIED') {
+    help.textContent = ui('需要在插件详情中允许查看伙伴，才能设置专属文件夹。', 'Allow this plugin to look up partners in its details to set partner folders.');
+    return;
+  }
+  if (data.error) {
+    help.textContent = ui('暂时无法读取伙伴列表。', 'Partners are unavailable right now.');
+    return;
+  }
+  help.textContent = data.root
+    ? ui('伙伴在自己的对话中保存的新笔记，没写目录或写到收件箱时会放进它的文件夹。未单独设置的伙伴使用「' + data.root + '/伙伴名」。',
+      'When a partner saves a new note in its conversation with no folder, or to the inbox, it goes into the partner’s folder. Partners without their own setting use ' + data.root + '/<name>.')
+    : ui('只有下面设置过文件夹的伙伴使用专属文件夹，其他伙伴保存到收件箱「' + data.inboxFolder + '」。',
+      'Only partners with a folder set below use one. Others save to the inbox (' + data.inboxFolder + ').');
+  if (!data.companions.length) {
+    const empty = document.createElement('p');
+    empty.className = 'help';
+    empty.textContent = ui('这台电脑上还没有可用的伙伴。', 'No partners are available on this computer.');
+    list.append(empty);
+    return;
+  }
+  for (const item of data.companions) {
+    const row = document.createElement('div');
+    row.className = 'companion-row';
+    const name = document.createElement('span');
+    name.className = 'companion-name';
+    name.textContent = (item.name || item.id) + (data.current?.id === item.id ? ui('（当前对话）', ' (this conversation)') : '');
+    const input = document.createElement('input');
+    input.maxLength = 240;
+    input.value = item.custom ? item.folder : '';
+    input.placeholder = item.folder || ui('收件箱 ', 'Inbox ') + data.inboxFolder;
+    input.setAttribute('aria-label', ui('「' + (item.name || item.id) + '」的文件夹', 'Folder for ' + (item.name || item.id)));
+    const save = document.createElement('button');
+    save.type = 'button';
+    save.textContent = ui('保存', 'Save');
+    const reset = document.createElement('button');
+    reset.type = 'button';
+    reset.textContent = ui('恢复默认', 'Use default');
+    reset.classList.toggle('hidden', !item.custom);
+    const submit = async (folder) => {
+      for (const control of [input, save, reset]) control.disabled = true;
+      try {
+        const result = await callTool('set_companion_folder', { companionId: item.id, folder });
+        setStatus(result.companion.folder
+          ? ui('「' + (item.name || item.id) + '」的文件夹：' + result.companion.folder, (item.name || item.id) + ' folder: ' + result.companion.folder)
+          : ui('「' + (item.name || item.id) + '」将保存到收件箱。', (item.name || item.id) + ' will save to the inbox.'));
+        await loadCompanions(true);
+      } catch (error) {
+        reportError(error, '文件夹没有保存，请检查目录名称。', 'The folder was not saved. Check the folder name.');
+        for (const control of [input, save, reset]) control.disabled = false;
+      }
+    };
+    save.onclick = () => void submit(input.value.trim());
+    input.onkeydown = (event) => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        void submit(input.value.trim());
+      }
+    };
+    reset.onclick = () => void submit('');
+    row.append(name, input, save, reset);
+    list.append(row);
+  }
+}
+
+async function loadCompanions(force = false) {
+  if (companionsLoading || !connectionReady) return;
+  if (!force && $('#companion-list').childElementCount) return;
+  companionsLoading = true;
+  $('#companion-help').textContent = ui('正在读取伙伴…', 'Loading partners…');
+  try {
+    const sessionId = app.getHostContext()?.cindy?.source?.sessionId;
+    const data = await callTool('companion_folders', sessionId ? { sessionId } : {}, 20000);
+    if (controller.signal.aborted) return;
+    if (data.current?.folder) companion = data.current;
+    else if (data.current === null && companion?.id && sessionId) companion = null;
+    renderCompanions(data);
+    updateTarget();
+  } catch {
+    $('#companion-help').textContent = ui('暂时无法读取伙伴列表。', 'Partners are unavailable right now.');
+  } finally {
+    companionsLoading = false;
+  }
 }
 
 function renderNoteList(items, heading, empty) {
@@ -825,6 +1057,7 @@ function applyStatus(data) {
   writePolicy = data.writePolicy ?? { readOnly: false, writeFolders: null };
   renderWritePolicy();
   inbox = data.summary?.inboxFolder || 'Inbox';
+  if (data.summary?.companion?.folder) companion = data.summary.companion;
   localDate = data.summary?.localDate || '';
   if (previousVault?.id !== vault?.id) {
     previewRequest++;
@@ -947,7 +1180,7 @@ async function browseFolder(folder) {
   const seq = ++searchRequest;
   setStatus(ui('正在读取目录…', 'Reading folder…'));
   try {
-    const result = await callTool('list_notes', { vault: vault.id, folder, extension: 'md' });
+    const result = await callTool('list_files', { vault: vault.id, folder, extension: 'md' });
     if (seq !== searchRequest) return;
     browsedFolder = result.folder;
     searchPage = null;
@@ -1120,9 +1353,36 @@ $('#capture-form').onsubmit = async (event) => {
     setStatus(ui('请填写路径和正文。按章节追加时还需填写章节标题。', 'Enter a path and body. To append under a heading, enter the heading too.'));
     return;
   }
-  const args = { vault: vault.id, path, mode, content, ...(heading && mode === 'append-heading' ? { heading } : {}), ...(tags.length ? { tags } : {}) };
+  const args = {
+    vault: vault.id,
+    path,
+    mode,
+    content,
+    ...(heading && mode === 'append-heading' ? { heading } : {}),
+    ...(mode === 'create' && tags.length ? { frontmatter: { tags } } : {}),
+  };
   $('#save-receipt').classList.add('hidden');
-  await startWrite('write_note', path, args, content);
+  await startWrite('write_note', path, args, content, mode !== 'create' && tags.length ? { pendingTags: tags } : {});
+};
+$('#btn-open-saved').onclick = async () => {
+  if (!savedNote) return;
+  try {
+    await callTool('open_in_obsidian', { vault: savedNote.vault.id, path: savedNote.path });
+    setStatus(ui('已在知识库所在电脑打开 Obsidian：' + savedNote.path, 'Asked Obsidian on the vault computer to open ' + savedNote.path));
+  } catch {
+    setStatus(ui('无法打开 Obsidian，请检查知识库所在电脑的 Obsidian 安装。', 'Could not open Obsidian. Check the installation on the vault computer.'));
+  }
+};
+$('#btn-edit-reply').onclick = () => {
+  replySave.state = 'editing';
+  $('#cap-mode').value = 'create';
+  updateHeadingField();
+  updateTarget();
+  updateControls();
+  $('#cap-path').focus();
+};
+$('#companion-settings').ontoggle = () => {
+  if ($('#companion-settings').open) void loadCompanions();
 };
 $('#btn-view-saved').onclick = () => {
   if (!savedNote || savedNote.vault.id !== vault?.id) return;
@@ -1173,6 +1433,7 @@ app.ontoolresult = (result) => {
   statusRequest++;
   statusPending = false;
   initialized = true;
+  if (data.companion?.folder) companion = data.companion;
   syncHostContext();
   applyStatus(data.status);
   reportVaultStatus();
@@ -1198,6 +1459,8 @@ try {
     const input = app.getHostContext()?.cindy?.input ?? {};
     if (input.mode) showTab(input.mode);
     if (await refreshStatus(input.vault)) {
+      void autoSaveReply();
+      void loadCompanion();
       if (input.query) {
         $('#search-input').value = input.query;
         await search(input.query);

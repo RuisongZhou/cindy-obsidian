@@ -72,9 +72,111 @@ function serializeWrite(operation) {
   return result;
 }
 
+const COMPANION_ROOT_DEFAULT = '伙伴';
+const companionCache = new Map();
+let companionLookupDenied = false;
+let openFilePending = false;
+
+const isPlainObject = (value) => Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+
+function companionRoot(settings) {
+  const raw = settings.companion_folder_root;
+  return typeof raw === 'string' ? raw.trim().replace(/\\/g, '/').replace(/^\/+|\/+$/g, '') : COMPANION_ROOT_DEFAULT;
+}
+
+function folderSegment(name) {
+  return String(name || '')
+    .replace(/[\u0000-\u001f\u007f]/g, ' ')
+    .replace(/[\\/:*?"<>|#^[\]]/g, '-')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/^[.\s]+/, '')
+    .slice(0, 60)
+    .trim();
+}
+
+function inboxFolder(settings) {
+  const raw = settings.inbox_folder ?? settings.inboxFolder;
+  return (typeof raw === 'string' && raw.trim()) ? raw.trim() : 'Inbox';
+}
+
+// A partner uses its saved folder, otherwise <root>/<partner name>; a blank root turns the default off.
+function companionFolder(companion, settings) {
+  const saved = isPlainObject(settings.companion_folders) ? settings.companion_folders[companion.id] : null;
+  if (isPlainObject(saved) && typeof saved.folder === 'string' && saved.folder.trim()) {
+    return { folder: saved.folder.trim(), custom: true };
+  }
+  const root = companionRoot(settings);
+  const segment = folderSegment(companion.name) || folderSegment(companion.id);
+  return { folder: root && segment ? root + '/' + segment : null, custom: false };
+}
+
+// The host resolves only a partner's main conversation to that partner; other sessions return null.
+async function companionForSession(sessionId) {
+  if (typeof sessionId !== 'string' || !sessionId || sessionId.length > 200 || companionLookupDenied ||
+      typeof cindy.targets?.resolve !== 'function') return null;
+  const cached = companionCache.get(sessionId);
+  if (cached && Date.now() - cached.at < 60000) return cached.value;
+  let value = null;
+  try {
+    const target = await cindy.targets.resolve({ session: sessionId });
+    if (target?.kind === 'bot' && typeof target.id === 'string') {
+      value = { id: target.id, name: typeof target.label === 'string' ? target.label : '' };
+    }
+  } catch (err) {
+    // Do not ask again after a refusal; saves fall back to the inbox.
+    if (err?.code === 'PERMISSION_DENIED') companionLookupDenied = true;
+  }
+  companionCache.set(sessionId, { at: Date.now(), value });
+  if (companionCache.size > 200) companionCache.delete(companionCache.keys().next().value);
+  return value;
+}
+
+async function companionContext(sessionId, settings) {
+  const companion = await companionForSession(sessionId);
+  if (!companion) return null;
+  const { folder } = companionFolder(companion, settings || await getSettings());
+  return folder ? { id: companion.id, name: companion.name, folder } : null;
+}
+
+async function listCompanions(settings) {
+  if (companionLookupDenied) return { companions: [], error: 'PERMISSION_DENIED' };
+  if (typeof cindy.targets?.list !== 'function') return { companions: [], error: 'UNSUPPORTED' };
+  try {
+    const { targets } = await cindy.targets.list({ targetKind: 'bot' });
+    const companions = (Array.isArray(targets) ? targets : []).slice(0, 100)
+      .filter((target) => typeof target?.id === 'string')
+      .map((target) => {
+        const companion = { id: target.id, name: typeof target.label === 'string' ? target.label : '' };
+        return { ...companion, ...companionFolder(companion, settings) };
+      });
+    return { companions, error: null };
+  } catch (err) {
+    if (err?.code === 'PERMISSION_DENIED') companionLookupDenied = true;
+    return { companions: [], error: err?.code || 'UNAVAILABLE' };
+  }
+}
+
+function newRequestKey() {
+  try {
+    return crypto.randomUUID();
+  } catch {
+    return Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 14);
+  }
+}
+
+function localTimestamp(date = new Date()) {
+  const pad = (n) => String(n).padStart(2, '0');
+  return date.getFullYear() + '-' + pad(date.getMonth() + 1) + '-' + pad(date.getDate()) + ' ' + pad(date.getHours()) + ':' + pad(date.getMinutes());
+}
+
+const clip = (text, max) => (text.length > max ? text.slice(0, max - 1) + '…' : text);
+
 async function callWorker(method, params, callId, timeoutMs = 45000) {
   const action = params?.action;
-  const mutates = method === 'write_note' || (method === 'replace_in_note' && !params?.dryRun) ||
+  const mutates = method === 'write_note' || method === 'delete_note' ||
+    method === 'capture_note' || method === 'import_markdown_file' ||
+    (method === 'replace_in_note' && !params?.dryRun) ||
     (method === 'manage_tags' && params?.operation !== 'list') ||
     (method === 'daily_note' && Boolean(action) && action !== 'read') ||
     (method === 'canvas_ops' && Boolean(action) && action !== 'read' && action !== 'list');
@@ -104,7 +206,8 @@ function summarizeResult(tool, data) {
       const v = data.activeVault;
       if (!v) return data.activeVaultError || '尚未检测到可用的 Obsidian 知识库。';
       const s = data.summary;
-      return '当前知识库：' + v.name + ' (' + v.path + ')，共 ' + (s ? s.noteCount : 0) + ' 篇笔记、' + (s ? s.totalWikilinks : 0) + ' 条双链、' + (s ? s.openTaskCount : 0) + ' 项未完待办。';
+      return '当前知识库：' + v.name + ' (' + v.path + ')，共 ' + (s ? s.noteCount : 0) + ' 篇笔记、' + (s ? s.totalWikilinks : 0) + ' 条双链、' + (s ? s.openTaskCount : 0) + ' 项未完待办。' +
+        (s?.companion?.folder ? '当前伙伴「' + s.companion.name + '」的默认保存目录：' + s.companion.folder + '。' : '');
     }
     case 'search_notes': {
       const list = (data.results || []).map((r, i) => {
@@ -115,8 +218,12 @@ function summarizeResult(tool, data) {
       }).join('\n');
       return '在知识库「' + (data.vault?.name || '') + '」中找到 ' + (data.totalMatches || 0) + ' 篇匹配笔记' + (list ? '：\n' + list : '。') + (data.nextCursor ? '\n还有结果，可使用 nextCursor 获取下一页。' : '');
     }
-    case 'list_notes':
+    case 'list_files':
       return '目录「' + (data.folder || '/') + '」返回 ' + data.entries.length + ' 项' + (data.truncated ? '，结果不完整。' : '。');
+    case 'list_tags':
+      return '知识库「' + (data.vault?.name || '') + '」共有 ' + (data.totalTags || 0) + ' 个匹配标签，已返回前 ' + (data.tags?.length || 0) + ' 个。';
+    case 'delete_note':
+      return '已将知识库「' + (data.vault?.name || '') + '」中的笔记 ' + data.path + ' 移入回收站 (' + data.trashFile + ')。';
     case 'replace_in_note':
       return data.path + '：' + (data.action === 'preview' ? '预览找到 ' : '已处理 ') + data.matchCount + ' 处匹配。';
     case 'manage_tags':
@@ -132,7 +239,6 @@ function summarizeResult(tool, data) {
     case 'graph_links': {
       if (data.mode === 'orphans') return '共发现 ' + data.count + ' 篇孤立笔记。';
       if (data.mode === 'hubs') return '已返回连接度最高的 ' + (data.hubs?.length || 0) + ' 篇枢纽笔记。';
-      if (data.mode === 'tags') return '已返回 ' + (data.tags?.length || 0) + ' 个标签的分布统计。';
       return '笔记「' + (data.note?.path || '') + '」图谱：出链 ' + (data.outlinks?.length || 0) + ' 条，反向链接 ' + (data.backlinks?.length || 0) + ' 条，未连接提及 ' + (data.unlinkedMentions?.length || 0) + ' 处，二跳关联 ' + (data.relatedTwoHop?.length || 0) + ' 篇。';
     }
     case 'canvas_ops': {
@@ -172,11 +278,219 @@ function sendToolError(callId, message, errorCode = 'OBSIDIAN_ERROR', writeNotCo
   });
 }
 
+const CONFIRM_BUTTON_MAX = 12;
+const CONFIRM_RETRY_CODES = new Set(['BUSY', 'RATE_LIMITED', 'UNAVAILABLE']);
+
+// Host limits: body ≤300 and buttons ≤12 characters, one dialog at a time, 3 s between requests.
+// A dialog that could not be shown is asked once more after the interval.
+async function confirmWithRetry(spec) {
+  const request = {
+    ...spec,
+    body: clip(spec.body, 300),
+    ...(spec.confirmText ? { confirmText: clip(spec.confirmText, CONFIRM_BUTTON_MAX) } : {}),
+    ...(spec.cancelText ? { cancelText: clip(spec.cancelText, CONFIRM_BUTTON_MAX) } : {}),
+  };
+  let answer = await cindy.confirm(request).catch(() => null);
+  if (!answer?.ok && (!answer || CONFIRM_RETRY_CODES.has(answer.errorCode))) {
+    await new Promise((resolve) => setTimeout(resolve, 3200));
+    answer = await cindy.confirm(request).catch(() => null);
+  }
+  return answer;
+}
+
+async function openWithDefaultApp(file) {
+  try {
+    const res = await cindy.node.request({ method: 'open_with_default_app', params: { file }, timeoutMs: 10000 });
+    return Boolean(res?.ok);
+  } catch {
+    return false;
+  }
+}
+
+async function askToImportMarkdown(file, info, settings) {
+  const { companions } = await listCompanions(settings);
+  const folderOptions = [{ value: info.inboxFolder, label: '收件箱 · ' + info.inboxFolder }];
+  for (const companion of companions) {
+    if (companion.folder && !folderOptions.some((option) => option.value === companion.folder)) {
+      folderOptions.push({ value: companion.folder, label: clip((companion.name || '伙伴') + ' · ' + companion.folder, 120) });
+    }
+    if (folderOptions.length >= 50) break;
+  }
+  const fields = [];
+  if (info.vaults.length > 1) {
+    fields.push({ type: 'select', key: 'vault', label: '知识库', required: true,
+      options: info.vaults.slice(0, 50).map((vault) => ({ value: vault.id, label: clip(vault.name, 120) })) });
+  }
+  fields.push(
+    { type: 'select', key: 'folder', label: '保存到', required: true, options: folderOptions },
+    { type: 'text', key: 'customFolder', label: '其他目录', placeholder: '可选，例如 项目/调研', maxLength: 240 },
+    { type: 'text', key: 'name', label: '笔记名称', required: true, maxLength: 120 },
+  );
+  const answer = await cindy.form({
+    title: '添加到 Obsidian',
+    description: clip('把「' + info.name + '」复制一份到 Obsidian 知识库，原文件保持不变。', 300),
+    fields,
+    values: { vault: info.defaultVault || info.vaults[0].id, folder: info.inboxFolder, customFolder: '', name: info.stem },
+    submitText: '添加到 Obsidian',
+    cancelText: '取消',
+    action: { id: 'open', text: '用默认应用打开' },
+  }).catch(() => null);
+
+  // The open was already claimed, so any failure to ask falls back to the usual default-app open.
+  if (!answer?.ok || (answer.outcome === 'action' && answer.action === 'open')) {
+    await openWithDefaultApp(file);
+    return;
+  }
+  if (answer.outcome !== 'submit') return;
+
+  const values = answer.values || {};
+  const vaultId = typeof values.vault === 'string' && values.vault ? values.vault : (info.defaultVault || info.vaults[0].id);
+  const folder = (typeof values.customFolder === 'string' && values.customFolder.trim()) ||
+    (typeof values.folder === 'string' && values.folder) || info.inboxFolder;
+  const res = await callWorker('import_markdown_file', {
+    file, vault: vaultId, folder, name: typeof values.name === 'string' ? values.name : info.stem, idempotencyKey: newRequestKey(),
+  }).catch((err) => ({ ok: false, message: err?.message }));
+
+  if (res.ok) {
+    const saved = res.result;
+    const shown = await confirmWithRetry({
+      body: '已添加到知识库「' + saved.vault.name + '」：' + saved.path,
+      confirmText: '打开笔记',
+      cancelText: '完成',
+    });
+    if (shown?.ok && shown.confirmed) await callWorker('open_in_obsidian', { vault: saved.vault.id, path: saved.path }).catch(() => {});
+    return;
+  }
+  const failure = await confirmWithRetry({
+    body: '没有添加到 Obsidian：' + extractWorkerError(res, '保存失败。').msg,
+    confirmText: '用默认应用打开',
+    cancelText: '关闭',
+  });
+  if (failure?.ok && failure.confirmed) await openWithDefaultApp(file);
+}
+
+// Cindy hands over a local .md file the user is opening with the default app.
+async function handleOpenFile(msg) {
+  const requestId = msg.requestId;
+  const file = msg.data?.path;
+  const reply = (ok) => cindy.send({ type: 'file-open-result', requestId, ok });
+  let settings;
+  let info;
+  try {
+    settings = await getSettings(true);
+    if (settings.md_open_prompt === false || typeof cindy.form !== 'function' || openFilePending || typeof file !== 'string') {
+      await reply(false);
+      return;
+    }
+    const res = await cindy.node.request({ method: 'inspect_markdown_file', params: { file, settings }, timeoutMs: 8000 });
+    // Notes already in a vault and setups without a vault keep the usual open.
+    if (!res?.ok || res.result.insideVault || !res.result.vaults.length) {
+      await reply(false);
+      return;
+    }
+    info = res.result;
+  } catch {
+    await reply(false);
+    return;
+  }
+  openFilePending = true;
+  try {
+    await reply(true);
+    await askToImportMarkdown(file, info, settings);
+  } finally {
+    openFilePending = false;
+  }
+}
+
 cindy.onHostMessage(async function (msg) {
+  if (msg?.type === 'event' && msg.name === 'open-file') {
+    // The dialog can stay open for minutes; do not hold up other host messages.
+    void handleOpenFile(msg).catch(() => {});
+    return;
+  }
   if (!msg || msg.type !== 'tool-call') return;
-  const { tool, args = {}, callId } = msg;
+  const { tool, callId } = msg;
+  // session_context is minted by the host for Agent calls; _companion is only set below.
+  const { session_context: sessionContext, _companion: _ignored, ...args } = isPlainObject(msg.args) ? msg.args : {};
 
   try {
+    if (tool === 'companion_folders') {
+      const settings = await getSettings(true);
+      const { companions, error } = await listCompanions(settings);
+      const current = await companionContext(args.sessionId, settings);
+      await sendSuccess(callId, '已读取 ' + companions.length + ' 位伙伴的专属文件夹。', {
+        root: companionRoot(settings),
+        inboxFolder: inboxFolder(settings),
+        companions,
+        current,
+        error,
+      });
+      return;
+    }
+
+    if (tool === 'set_companion_folder') {
+      const id = args.companionId;
+      if (typeof id !== 'string' || !id || id.length > 200) {
+        await sendToolError(callId, '请选择一位伙伴。', 'INVALID_COMPANION');
+        return;
+      }
+      if (typeof cindy.targets?.resolve !== 'function') {
+        await sendToolError(callId, '当前 Cindy 版本无法查询伙伴。', 'UNSUPPORTED');
+        return;
+      }
+      let target;
+      try {
+        target = await cindy.targets.resolve({ target: { kind: 'bot', id } });
+      } catch (err) {
+        await sendToolError(callId, '找不到这位伙伴，或伙伴已停用。', err?.code || 'TARGET_UNAVAILABLE');
+        return;
+      }
+      let folder = null;
+      if (typeof args.folder === 'string' && args.folder.trim()) {
+        const checked = await callWorker('check_folder', { folder: args.folder }, callId);
+        if (!checked.ok) {
+          const error = extractWorkerError(checked, '目录无效。');
+          await sendToolError(callId, error.msg, error.code);
+          return;
+        }
+        folder = checked.result.folder;
+      }
+      const next = await serializeWrite(() => patchSettings((settings) => {
+        const map = isPlainObject(settings.companion_folders) ? { ...settings.companion_folders } : {};
+        if (folder) map[id] = { folder, name: target.label || '' };
+        else delete map[id];
+        return { companion_folders: map };
+      }));
+      const companion = { id, name: target.label || '' };
+      const result = { ...companion, ...companionFolder(companion, next) };
+      await sendSuccess(callId, (result.folder ? '伙伴「' + companion.name + '」的专属文件夹：' + result.folder : '伙伴「' + companion.name + '」不使用专属文件夹。'), { companion: result });
+      return;
+    }
+
+    if (tool === 'capture_reply') {
+      if (typeof args.content !== 'string' || !args.content.trim()) {
+        await sendToolError(callId, '这条回复还没有可保存的正文。', 'EMPTY_CONTENT', true);
+        return;
+      }
+      const settings = await getSettings(true, true);
+      const companion = await companionContext(args.sessionId, settings);
+      const res = await callWorker('capture_note', {
+        vault: args.vault,
+        folder: companion?.folder || inboxFolder(settings),
+        title: args.title,
+        content: args.content,
+        frontmatter: { source: 'Cindy', created: localTimestamp(), ...(companion ? { companion: companion.name } : {}) },
+        idempotencyKey: args.idempotencyKey,
+      }, callId);
+      if (!res.ok) {
+        const { code, msg: errText } = extractWorkerError(res, '保存失败。');
+        await sendToolError(callId, errText, code, Boolean(res.data?.errorCode && code !== 'WRITE_OUTCOME_UNKNOWN'));
+        return;
+      }
+      await sendSuccess(callId, '已保存到 ' + res.result.path + '。', { ...res.result, companion });
+      return;
+    }
+
     if (tool === 'complete_notes') {
       const res = await callWorker('complete_notes', { trigger: args.trigger || '@', query: args.query || '' }, callId, 2000);
       const items = res.ok && res.result && Array.isArray(res.result.items) ? res.result.items : [];
@@ -258,7 +572,8 @@ cindy.onHostMessage(async function (msg) {
     }
 
     if (tool === 'open_workbench') {
-      const statusRes = await callWorker('vault_status', { vault: args.vault }, callId);
+      const companion = await companionContext(sessionContext?.session_id);
+      const statusRes = await callWorker('vault_status', { vault: args.vault, _companion: companion }, callId);
       if (!statusRes.ok) {
         const { code, msg: errText } = extractWorkerError(statusRes, '读取 Obsidian 知识库状态失败。');
         await sendToolError(callId, errText, code);
@@ -284,6 +599,7 @@ cindy.onHostMessage(async function (msg) {
         initialNote,
         initialNoteError,
         searchResults,
+        companion,
       };
       await sendSuccess(callId, '已打开 Obsidian 知识库工作台。', payload);
       return;
@@ -295,7 +611,7 @@ cindy.onHostMessage(async function (msg) {
       let boundPath = args.path;
       let expectedMtimeMs = null;
 
-      if (mode === 'delete' || mode === 'overwrite') {
+      if (mode === 'overwrite') {
         const inspectRes = await callWorker('inspect_write_target', { vault: args.vault, path: args.path, ext: '.md' }, callId);
         if (!inspectRes.ok) {
           const { code, msg: errText } = extractWorkerError(inspectRes, '无法核验目标笔记路径。');
@@ -306,30 +622,30 @@ cindy.onHostMessage(async function (msg) {
         boundVaultId = target.vault.id;
         boundPath = target.path;
         expectedMtimeMs = target.mtimeMs;
-        if (mode === 'delete' && !target.exists) {
-          await sendToolError(callId, '要删除的笔记「' + target.path + '」在知识库「' + target.vault.name + '」中不存在。', 'NOTE_NOT_FOUND');
-          return;
-        }
-        if (mode === 'delete' || target.exists) {
-          const actionDesc = mode === 'delete'
-            ? '将知识库「' + target.vault.name + '」中的笔记「' + target.path + '」移入回收站 (.trash)？'
-            : '整篇覆盖知识库「' + target.vault.name + '」中已有笔记「' + target.path + '」的全部内容？';
+        if (target.exists) {
           const conf = await cindy.confirm({
-            body: actionDesc,
-            confirmText: mode === 'delete' ? '移入回收站' : '确认覆盖',
+            body: '整篇覆盖知识库「' + target.vault.name + '」中已有笔记「' + target.path + '」的全部内容？',
+            confirmText: '确认覆盖',
             cancelText: '取消',
             danger: true,
           });
           if (!conf || !conf.ok || !conf.confirmed) {
-            await sendToolError(callId, '用户未确认该' + (mode === 'delete' ? '删除' : '覆盖') + '操作，笔记保持原样未修改。', 'CONFIRMATION_DECLINED');
+            await sendToolError(callId, '用户未确认该覆盖操作，笔记保持原样未修改。', 'CONFIRMATION_DECLINED');
             return;
           }
         }
       }
 
+      const companion = mode === 'create' ? await companionContext(sessionContext?.session_id) : null;
       const res = await callWorker(
         'write_note',
-        { ...args, vault: boundVaultId, path: boundPath, ...(expectedMtimeMs !== null ? { expectedMtimeMs } : {}) },
+        {
+          ...args,
+          vault: boundVaultId,
+          path: boundPath,
+          ...(expectedMtimeMs !== null ? { expectedMtimeMs } : {}),
+          ...(companion ? { _companion: companion } : {}),
+        },
         callId
       );
       if (!res.ok) {
@@ -338,10 +654,46 @@ cindy.onHostMessage(async function (msg) {
         return;
       }
       const r = res.result;
-      const summary = mode === 'delete'
-        ? '已将知识库「' + r.vault.name + '」中的笔记 ' + r.path + ' 移入回收站 (' + r.trashFile + ')。'
-        : '已更新笔记 ' + r.path + '（动作: ' + r.action + '，知识库: ' + r.vault.name + '）。';
+      const summary = '已更新笔记 ' + r.path + '（动作: ' + r.action + '，知识库: ' + r.vault.name + '）。' +
+        (r.redirectedFrom ? '已按伙伴「' + (companion?.name || '') + '」的专属文件夹保存（原路径 ' + r.redirectedFrom + '）。' : '') +
+        (r.companionFolderWarning ? r.companionFolderWarning : '');
       await sendSuccess(callId, summary, r);
+      return;
+    }
+
+    if (tool === 'delete_note') {
+      const inspectRes = await callWorker('inspect_write_target', { vault: args.vault, path: args.path, ext: '.md' }, callId);
+      if (!inspectRes.ok) {
+        const { code, msg: errText } = extractWorkerError(inspectRes, '无法核验目标笔记路径。');
+        await sendToolError(callId, errText, code);
+        return;
+      }
+      const target = inspectRes.result;
+      if (!target.exists) {
+        await sendToolError(callId, '要移入回收站的笔记「' + target.path + '」在知识库「' + target.vault.name + '」中不存在。', 'NOTE_NOT_FOUND');
+        return;
+      }
+      const conf = await cindy.confirm({
+        body: '将知识库「' + target.vault.name + '」中的笔记「' + target.path + '」移入回收站 (.trash)？',
+        confirmText: '移入回收站',
+        cancelText: '取消',
+        danger: true,
+      });
+      if (!conf || !conf.ok || !conf.confirmed) {
+        await sendToolError(callId, '用户未确认移入回收站操作，笔记保持原样未修改。', 'CONFIRMATION_DECLINED');
+        return;
+      }
+      const res = await callWorker(
+        'delete_note',
+        { ...args, vault: target.vault.id, path: target.path, expectedMtimeMs: target.mtimeMs },
+        callId
+      );
+      if (!res.ok) {
+        const { code, msg: errText } = extractWorkerError(res, '移入回收站失败。');
+        await sendToolError(callId, errText, code, Boolean(res.data?.errorCode && code !== 'WRITE_OUTCOME_UNKNOWN'));
+        return;
+      }
+      await sendSuccess(callId, summarizeResult('delete_note', res.result), res.result);
       return;
     }
 
@@ -393,7 +745,8 @@ cindy.onHostMessage(async function (msg) {
     const directMethods = new Set([
       'vault_status',
       'search_notes',
-      'list_notes',
+      'list_files',
+      'list_tags',
       'read_note',
       'replace_in_note',
       'manage_tags',
@@ -404,7 +757,8 @@ cindy.onHostMessage(async function (msg) {
     ]);
 
     if (directMethods.has(tool)) {
-      const res = await callWorker(tool, args, callId);
+      const params = tool === 'vault_status' ? { ...args, _companion: await companionContext(sessionContext?.session_id) } : args;
+      const res = await callWorker(tool, params, callId);
       if (!res.ok) {
         const { code, msg: errText } = extractWorkerError(res, '执行 Obsidian 工具失败。');
         const rejectedWrite = tool === 'daily_note' && args.action !== 'read' &&
