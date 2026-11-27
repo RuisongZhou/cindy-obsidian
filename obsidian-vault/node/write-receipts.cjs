@@ -5,13 +5,16 @@ const { createHash, randomUUID } = require('node:crypto');
 
 const digest = (value) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 
-function receiptDirectory() {
+// The plugin's private folder in this computer's application data.
+function stateDirectory() {
   const home = os.homedir();
   const state = process.platform === 'darwin' ? path.join(home, 'Library', 'Application Support')
     : process.platform === 'win32' ? process.env.LOCALAPPDATA || path.join(home, 'AppData', 'Local')
     : path.isAbsolute(process.env.XDG_STATE_HOME || '') ? process.env.XDG_STATE_HOME : path.join(home, '.local', 'state');
-  return path.join(state, 'Cindy Obsidian Vault', 'write-receipts');
+  return path.join(state, 'Cindy Obsidian Vault');
 }
+
+const receiptDirectory = () => path.join(stateDirectory(), 'write-receipts');
 
 function unknownWrite() {
   return Object.assign(new Error('无法确认上次写入结果。请在执行电脑核对目标笔记，避免重复写入。'), {
@@ -101,4 +104,4 @@ async function getWriteReceipt(vault, method, key) {
   return { state: 'saved', path: record.result.path };
 }
 
-module.exports = { prepareWrite, getWriteReceipt };
+module.exports = { prepareWrite, getWriteReceipt, stateDirectory };

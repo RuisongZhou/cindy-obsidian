@@ -43,7 +43,7 @@
       }
     },
     "write_note": {
-      "description": "ノートの新規作成、上書き、追記、見出し・ブロック編集、タグ以外のフロントマター更新を行います。パートナーの会話でフォルダー未指定（または受信箱）の新規ノートは、そのパートナー専用フォルダーに保存され、実際のパスを返します。部分置換は replace_in_note、既存ノートのタグ編集は manage_tags、ゴミ箱移動は delete_note、デイリーノートは daily_note を使用してください。既存ノートの上書きには確認が必要です。",
+      "description": "ノートの新規作成、上書き、追記、見出し・ブロック編集、タグ以外のフロントマター更新を行います。パートナーの会話でフォルダー未指定（または受信箱）の新規ノートは、そのパートナー専用フォルダーに保存され、実際のパスを返します。部分置換は replace_in_note、既存ノートのタグ編集は manage_tags、ゴミ箱移動は delete_note、デイリーノートは daily_note を使用してください。既存ノートの上書きはすぐには実行されません。会話に確認カードが表示され（status=\"awaiting_confirmation\"）、ユーザーがクリックした後に書き込みます。",
       "parameters": {
         "/properties/headingPath": {
           "description": "同名見出しを区別する完全見出しパス。heading と blockId とは併用できません。"
@@ -65,7 +65,15 @@
       }
     },
     "delete_note": {
-      "description": "指定した Markdown ノートを完全削除せず、安全にボールトのゴミ箱（.trash）へ移動します。実行前に Cindy の確認ダイアログが表示されます。"
+      "description": "指定した Markdown ノートを完全削除せず、安全にボールトのゴミ箱（.trash）へ移動します。すぐには実行されません。会話に確認カードを表示して confirmationId を返し、ユーザーが使用中の端末でクリックした後に移動します（10 分間有効）。再実行せず、confirmation_status で結果を確認してください。"
+    },
+    "confirmation_status": {
+      "description": "確認カードの結果を読み取ります。削除や上書きが awaiting_confirmation を返した後、ユーザーがクリックしたと伝えた場合や次の手順に結果が必要な場合に使用します。",
+      "parameters": {
+        "/properties/confirmationId": {
+          "description": "元のツールが返した confirmationId。"
+        }
+      }
     },
     "manage_tags": {
       "description": "単一 Markdown ノートのフロントマターにあるタグを完全一致で一覧・追加・削除します。大文字小文字を区別せず子タグを誤削除しません。ボールト全体のタグ一覧は list_tags を使用してください。"
@@ -77,7 +85,7 @@
       "description": "ノートのリンク・埋め込み・バックリンク・未リンク言及・2 ホップ関連ノート、またはボールトのハブと孤立ノートを分析します。タグ集計は list_tags を使用してください。"
     },
     "canvas_ops": {
-      "description": "Canvas（.canvas）の一覧表示、読み取り、新規作成、ID 単位の安全なマージ更新（upsert）、全体上書き（確認あり）を行います。"
+      "description": "Canvas（.canvas）の一覧表示、読み取り、新規作成、ID 単位の安全なマージ更新（upsert）、全体上書き（確認カードのクリック後に実行）を行います。"
     },
     "open_in_obsidian": {
       "description": "実行端末のデスクトップ版 Obsidian で既存のノート・Canvas・ボールトを開きます。Cindy 内のパネルを開くには open_workbench を使用してください。"
@@ -91,11 +99,27 @@
     "pick_vault_dir": {
       "description": "ワークベンチ専用：フォルダー選択ダイアログで既定ボールトを登録します。画面を開くには open_workbench を使用してください。"
     },
+    "add_vault_path": {
+      "description": "ワークベンチ専用：ボールトのある PC のフォルダー選択画面を操作できない場合に、入力したパスのボールトを登録します。パスを確認し、ユーザーがワークベンチで承認した後に追加します。",
+      "parameters": {
+        "/properties/path": {
+          "description": "ボールトのある PC 上のフォルダーの完全パス。"
+        },
+        "/properties/confirmed": {
+          "description": "確認済みのパスをユーザーが承認した場合は true。"
+        }
+      }
+    },
     "write_receipt": {
       "description": "ワークベンチ専用：ボールトを変更せずに前回のノートまたはデイリーノートの保存結果を確認します。"
     },
     "set_vault_write_policy": {
-      "description": "ワークベンチ専用：Cindy の確認後、ボールトの読み取り専用設定と書き込み許可フォルダーを保存します。"
+      "description": "ワークベンチ専用：ワークベンチ内でユーザーが確認した後、ボールトの読み取り専用設定と書き込み許可フォルダーを保存します。",
+      "parameters": {
+        "/properties/confirmed": {
+          "description": "ユーザーがワークベンチでこのルールを確認した場合は true。"
+        }
+      }
     },
     "companion_folders": {
       "description": "ワークベンチ専用：パートナーとボールト内の専用保存フォルダーを一覧し、現在のタスクのパートナーを返します。",

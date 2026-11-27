@@ -43,7 +43,7 @@
       }
     },
     "write_note": {
-      "description": "노트 생성, 덮어쓰기, 추가/앞에 넣기, 제목·블록 편집, 태그 외 프런트매터 업데이트를 수행합니다. 파트너 대화에서 폴더를 지정하지 않은(또는 받은편지함의) 새 노트는 해당 파트너 전용 폴더에 저장되며 실제 경로를 반환합니다. 부분 텍스트 교체는 replace_in_note, 기존 노트 태그 편집은 manage_tags, 휴지통 이동은 delete_note, 데일리 노트는 daily_note를 사용하세요. 기존 노트 덮어쓰기 전 확인이 필요합니다.",
+      "description": "노트 생성, 덮어쓰기, 추가/앞에 넣기, 제목·블록 편집, 태그 외 프런트매터 업데이트를 수행합니다. 파트너 대화에서 폴더를 지정하지 않은(또는 받은편지함의) 새 노트는 해당 파트너 전용 폴더에 저장되며 실제 경로를 반환합니다. 부분 텍스트 교체는 replace_in_note, 기존 노트 태그 편집은 manage_tags, 휴지통 이동은 delete_note, 데일리 노트는 daily_note를 사용하세요. 기존 노트 덮어쓰기는 바로 실행되지 않습니다. 대화에 확인 카드가 표시되며(status=\"awaiting_confirmation\") 사용자가 클릭한 뒤에 저장합니다.",
       "parameters": {
         "/properties/headingPath": {
           "description": "동일 제목 구분을 위한 전체 제목 경로. heading 및 blockId와 함께 사용할 수 없습니다."
@@ -65,7 +65,15 @@
       }
     },
     "delete_note": {
-      "description": "지정한 Markdown 노트를 영구 삭제 대신 보관함 휴지통(.trash)으로 안전하게 이동합니다. 실행 전 Cindy 확인 창이 표시됩니다."
+      "description": "지정한 Markdown 노트를 영구 삭제 대신 보관함 휴지통(.trash)으로 안전하게 이동합니다. 바로 실행되지 않습니다. 대화에 확인 카드를 표시하고 confirmationId를 반환하며, 사용자가 사용 중인 기기에서 클릭한 뒤에 이동합니다(10분간 유효). 다시 호출하지 말고 confirmation_status로 결과를 확인하세요."
+    },
+    "confirmation_status": {
+      "description": "확인 카드의 결과를 읽습니다. 삭제나 덮어쓰기가 awaiting_confirmation을 반환한 뒤, 사용자가 클릭했다고 하거나 다음 단계에 결과가 필요할 때 사용합니다.",
+      "parameters": {
+        "/properties/confirmationId": {
+          "description": "원래 도구가 반환한 confirmationId."
+        }
+      }
     },
     "manage_tags": {
       "description": "단일 Markdown 노트의 프런트매터 태그를 전체 이름으로 조회, 추가, 제거합니다. 대소문자를 무시하며 하위 태그와 본문을 유지합니다. 보관함 전체 태그 목록은 list_tags를 사용하세요."
@@ -77,7 +85,7 @@
       "description": "노트의 링크, 임베드, 백링크, 미연결 언급, 2단계 연관 노트와 보관함 허브 및 고립 노트를 분석합니다. 태그 통계는 list_tags를 사용하세요."
     },
     "canvas_ops": {
-      "description": "Canvas(.canvas) 목록 조회, 읽기, 생성, ID 기준 무손실 병합(upsert), 전체 덮어쓰기(확인 필요)를 수행합니다."
+      "description": "Canvas(.canvas) 목록 조회, 읽기, 생성, ID 기준 무손실 병합(upsert), 전체 덮어쓰기(확인 카드 클릭 후 실행)를 수행합니다."
     },
     "open_in_obsidian": {
       "description": "실행 컴퓨터의 데스크톱 Obsidian 앱에서 기존 노트·Canvas·보관함을 엽니다. Cindy 안의 작업대를 열려면 open_workbench를 사용하세요."
@@ -91,11 +99,27 @@
     "pick_vault_dir": {
       "description": "작업대 전용: 시스템 폴더 선택기로 기본 보관함을 등록합니다. 화면 열기는 open_workbench를 사용하세요."
     },
+    "add_vault_path": {
+      "description": "작업대 전용: 보관함 컴퓨터의 폴더 선택 창을 조작할 수 없을 때 입력한 경로의 보관함을 등록합니다. 경로를 확인한 뒤 작업대에서 사용자가 승인하면 추가합니다.",
+      "parameters": {
+        "/properties/path": {
+          "description": "보관함 컴퓨터에 있는 보관함 폴더의 전체 경로."
+        },
+        "/properties/confirmed": {
+          "description": "확인된 경로를 사용자가 승인했으면 true."
+        }
+      }
+    },
     "write_receipt": {
       "description": "작업대 전용: 보관함을 변경하지 않고 이전 노트 또는 데일리 노트 저장 결과를 확인합니다."
     },
     "set_vault_write_policy": {
-      "description": "작업대 전용: Cindy 확인 후 보관함의 읽기 전용 설정과 쓰기 허용 폴더를 저장합니다."
+      "description": "작업대 전용: 작업대에서 사용자가 확인한 뒤 보관함의 읽기 전용 설정과 쓰기 허용 폴더를 저장합니다.",
+      "parameters": {
+        "/properties/confirmed": {
+          "description": "사용자가 작업대에서 이 규칙을 확인했으면 true."
+        }
+      }
     },
     "companion_folders": {
       "description": "워크벤치 전용: 파트너와 보관함 내 전용 저장 폴더를 나열하고 현재 작업의 파트너를 반환합니다.",

@@ -164,6 +164,9 @@ textarea { min-height: 120px; resize: vertical; line-height: 1.5; }
 .companion-name { flex: 1 1 8rem; font-weight: 600; overflow-wrap: anywhere; }
 .companion-row input { flex: 2 1 12rem; padding: 6px 8px; }
 .companion-row button { padding: 5px 9px; }
+#add-by-path { margin: 0 0 12px; font-size: 12px; }
+#add-by-path .card { margin: 8px 0 0; }
+.confirm-box p { margin: 0; font-size: 12.5px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .hidden { display: none !important; }
 </style>
 </head>
@@ -179,6 +182,22 @@ textarea { min-height: 120px; resize: vertical; line-height: 1.5; }
   </div>
 </header>
 <p id="execution-origin" class="help" data-en="This workbench accesses the vault on the computer running the plugin.">此工作台读写运行插件的电脑上的知识库。</p>
+<details id="add-by-path">
+  <summary data-en="Not at the vault computer? Add a vault by its path">不在知识库所在电脑前？按路径添加知识库</summary>
+  <form id="path-form" class="card">
+    <label class="field"><span data-en="Full path of the vault folder on the vault computer">知识库所在电脑上的文件夹完整路径</span>
+      <input id="vault-path-input" maxlength="1024" autocomplete="off" spellcheck="false" placeholder="/Users/name/Documents/My Vault">
+    </label>
+    <div class="action-bar"><button id="btn-check-path" type="submit" disabled data-en="Check folder">检查路径</button></div>
+  </form>
+  <div id="path-confirm" class="card confirm-box hidden">
+    <p id="path-confirm-text" role="status"></p>
+    <div class="action-bar">
+      <button id="btn-path-confirm" class="btn-primary" type="button" data-en="Add this vault">确认添加</button>
+      <button id="btn-path-cancel" type="button" data-en="Cancel">取消</button>
+    </div>
+  </div>
+</details>
 <p id="status" role="status">正在连接 Cindy…</p>
 <section id="write-recovery" class="card hidden">
   <p id="recovery-target" class="help"></p>
@@ -223,6 +242,13 @@ textarea { min-height: 120px; resize: vertical; line-height: 1.5; }
       </label>
       <button id="btn-save-policy" type="submit" data-en="Save write rules">保存规则</button>
     </form>
+    <div id="policy-confirm" class="card confirm-box hidden">
+      <p id="policy-confirm-text" role="status"></p>
+      <div class="action-bar">
+        <button id="btn-policy-confirm" class="btn-primary" type="button" data-en="Confirm and save">确认保存</button>
+        <button id="btn-policy-cancel" type="button" data-en="Cancel">取消</button>
+      </div>
+    </div>
   </details>
   <details id="companion-settings">
     <summary data-en="Partner folders">伙伴专属文件夹</summary>
@@ -320,7 +346,7 @@ textarea { min-height: 120px; resize: vertical; line-height: 1.5; }
 <script type="module">
 import { App } from '@modelcontextprotocol/ext-apps';
 
-const app = new App({ name: 'Obsidian Vault', version: '1.1.3' }, {}, { autoResize: true });
+const app = new App({ name: 'Obsidian Vault', version: '1.1.4' }, {}, { autoResize: true });
 const $ = (selector) => document.querySelector(selector);
 const controller = new AbortController();
 const themeVariable = /^--(?:color|font|border|radius|shadow|spacing|surface|text|bg)-[a-z0-9-]+$/i;
@@ -354,6 +380,9 @@ let executionHost = '';
 let pendingWrite = null;
 let recoveryState = '';
 let policyPending = false;
+let policyDraft = null;
+let pathPending = false;
+let pathDraft = null;
 let writePolicy = { readOnly: false, writeFolders: null };
 let companion = null;
 let companionLookup = '';
@@ -460,7 +489,37 @@ function writePolicyLabel() {
   return '';
 }
 
+// Both confirmations are drawn in this page, so they appear on whichever device has it open.
+function renderPolicyConfirm() {
+  $('#policy-confirm').classList.toggle('hidden', !policyDraft);
+  if (!policyDraft) return;
+  const { vaultName, readOnly, restrictFolders, folders } = policyDraft;
+  const scope = readOnly ? ui('只读', 'read-only')
+    : !restrictFolders ? ui('允许写入全库', 'writes allowed in the entire vault')
+      : folders.length ? ui('仅允许写入这些目录：' + folders.join('、'), 'writes allowed only in: ' + folders.join(', '))
+        : ui('不允许写入任何目录', 'no writes in any folder');
+  $('#policy-confirm-text').textContent = ui(
+    '把知识库「' + vaultName + '」的写入规则改为：' + scope + '。确认保存？',
+    'Change the write rules of “' + vaultName + '” to: ' + scope + '?'
+  );
+}
+
+function clearPolicyDraft() {
+  policyDraft = null;
+  renderPolicyConfirm();
+}
+
+function renderPathConfirm() {
+  $('#path-confirm').classList.toggle('hidden', !pathDraft);
+  if (!pathDraft) return;
+  $('#path-confirm-text').textContent = ui(
+    '把下面的文件夹添加为知识库并设为默认？插件将可以读写其中的笔记。\n' + pathDraft.path,
+    'Add this folder as a vault and make it the default? The plugin will be able to read and write its notes.\n' + pathDraft.path
+  );
+}
+
 function renderWritePolicy() {
+  clearPolicyDraft();
   $('#vault-read-only').checked = writePolicy.readOnly;
   $('#vault-write-scope').value = writePolicy.writeFolders === null ? 'all' : 'folders';
   $('#vault-write-folders').value = writePolicy.writeFolders?.join('\n') ?? '';
@@ -508,6 +567,11 @@ function updateControls() {
   $('#btn-daily-append').disabled = !writable;
   $('#btn-daily-task').disabled = !writable;
   for (const control of $('#vault-policy-form').elements) control.disabled = !ready;
+  $('#btn-policy-confirm').disabled = !ready;
+  // Stays usable while a folder picker waits on the vault computer: that is when a path is needed.
+  const canAddPath = initialized && connectionReady && !statusPending && !writePending && !policyPending && !pathPending;
+  $('#btn-check-path').disabled = !canAddPath;
+  $('#btn-path-confirm').disabled = !canAddPath;
   $('#btn-load-daily').disabled = !ready;
   $('#search-form').querySelector('button[type=submit]').disabled = !ready;
   $('#btn-folders').disabled = !ready;
@@ -1235,9 +1299,10 @@ $('#btn-pick-vault').onclick = async () => {
   dailyRequest++;
   pickerPending = true;
   updateControls();
-  setStatus(executionHost
+  setStatus((executionHost
     ? ui('请在「' + executionHost + '」的目录选择框中选择知识库…', 'Choose the vault folder in the picker on ' + executionHost + '…')
-    : ui('请在运行插件的电脑上选择知识库文件夹…', 'Choose a vault folder on the computer running the plugin…'));
+    : ui('请在运行插件的电脑上选择知识库文件夹…', 'Choose a vault folder on the computer running the plugin…')) +
+    ui('不在那台电脑前时，请改用上方的「按路径添加知识库」。', ' If you are not at that computer, add the vault by its path above.'));
   let picked;
   try {
     picked = await callTool('pick_vault_dir', {}, 10 * 60 * 1000);
@@ -1248,16 +1313,67 @@ $('#btn-pick-vault').onclick = async () => {
     pickerPending = false;
     updateControls();
   }
-  if (!picked) return;
+  if (picked) await useAddedVault(picked);
+};
+async function useAddedVault(added) {
   $('#search-input').value = '';
-  if (picked.activeVault) {
-    applyStatus(picked);
+  if (added.activeVault) {
+    applyStatus(added);
     reportVaultStatus();
     updateControls();
-  } else if (!await refreshStatus(picked.picked?.path)) {
+  } else if (!await refreshStatus(added.picked?.path)) {
     return;
   }
   if (activeTab === 'daily') await loadDaily();
+}
+$('#vault-path-input').oninput = () => {
+  pathDraft = null;
+  renderPathConfirm();
+};
+$('#path-form').onsubmit = async (event) => {
+  event.preventDefault();
+  const input = $('#vault-path-input').value.trim();
+  if ($('#btn-check-path').disabled || !input) return;
+  pathDraft = null;
+  renderPathConfirm();
+  pathPending = true;
+  updateControls();
+  try {
+    const data = await callTool('add_vault_path', { path: input });
+    if ($('#vault-path-input').value.trim() === input) pathDraft = data.pending ?? null;
+    setStatus();
+  } catch (error) {
+    reportError(error, '无法添加这个文件夹。', 'Could not use that folder. Enter the full path of an Obsidian vault folder on the vault computer.');
+  } finally {
+    pathPending = false;
+    renderPathConfirm();
+    updateControls();
+  }
+};
+$('#btn-path-cancel').onclick = () => {
+  pathDraft = null;
+  renderPathConfirm();
+};
+$('#btn-path-confirm').onclick = async () => {
+  const draft = pathDraft;
+  if (!draft || $('#btn-path-confirm').disabled) return;
+  pathDraft = null;
+  renderPathConfirm();
+  pathPending = true;
+  updateControls();
+  let added;
+  try {
+    added = await callTool('add_vault_path', { path: draft.path, confirmed: true });
+  } catch (error) {
+    reportError(error, '知识库未添加。', 'The vault was not added.');
+  } finally {
+    pathPending = false;
+    updateControls();
+  }
+  if (!added) return;
+  $('#vault-path-input').value = '';
+  $('#add-by-path').open = false;
+  await useAddedVault(added);
 };
 for (const button of document.querySelectorAll('.tab-btn')) {
   button.onclick = () => {
@@ -1270,16 +1386,31 @@ $('#cap-mode').onchange = updateHeadingField;
 $('#vault-write-scope').onchange = () => {
   $('#vault-folders-label').classList.toggle('hidden', $('#vault-write-scope').value === 'all');
 };
-$('#vault-policy-form').onsubmit = async (event) => {
+// Any further edit withdraws the question, so what is confirmed is what is saved.
+$('#vault-policy-form').addEventListener('input', clearPolicyDraft);
+$('#vault-policy-form').addEventListener('change', clearPolicyDraft);
+$('#vault-policy-form').onsubmit = (event) => {
   event.preventDefault();
   if ($('#btn-save-policy').disabled || !vault) return;
   const restrictFolders = $('#vault-write-scope').value === 'folders';
   const folders = restrictFolders ? $('#vault-write-folders').value.split(/\r?\n/).map((folder) => folder.trim()).filter(Boolean) : [];
   const readOnly = $('#vault-read-only').checked;
+  policyDraft = { vault: vault.id, vaultName: vault.name, readOnly, restrictFolders, folders };
+  renderPolicyConfirm();
+};
+$('#btn-policy-cancel').onclick = () => {
+  clearPolicyDraft();
+  setStatus(ui('写入规则未更改。', 'Write rules were not changed.'));
+};
+$('#btn-policy-confirm').onclick = async () => {
+  const draft = policyDraft;
+  if (!draft || draft.vault !== vault?.id || $('#btn-policy-confirm').disabled) return;
+  clearPolicyDraft();
   policyPending = true;
   updateControls();
   try {
-    const data = await callTool('set_vault_write_policy', { vault: vault.id, readOnly, restrictFolders, folders });
+    const { readOnly, restrictFolders, folders } = draft;
+    const data = await callTool('set_vault_write_policy', { vault: draft.vault, readOnly, restrictFolders, folders, confirmed: true });
     writePolicy = data.policy;
     renderWritePolicy();
     updateTarget();

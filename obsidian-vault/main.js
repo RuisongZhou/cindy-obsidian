@@ -174,14 +174,15 @@ const clip = (text, max) => (text.length > max ? text.slice(0, max - 1) + '…' 
 
 async function callWorker(method, params, callId, timeoutMs = 45000) {
   const action = params?.action;
-  const mutates = method === 'write_note' || method === 'delete_note' ||
+  const mutates = method === 'write_note' || method === 'delete_note' || method === 'resolve_confirmation' ||
     method === 'capture_note' || method === 'import_markdown_file' ||
     (method === 'replace_in_note' && !params?.dryRun) ||
     (method === 'manage_tags' && params?.operation !== 'list') ||
     (method === 'daily_note' && Boolean(action) && action !== 'read') ||
     (method === 'canvas_ops' && Boolean(action) && action !== 'read' && action !== 'list');
   const run = async () => {
-    const strict = mutates || method === 'inspect_write_target' || method === 'inspect_vault_write_policy';
+    const strict = mutates || method === 'inspect_write_target' || method === 'inspect_vault_write_policy' ||
+      method === 'request_confirmation';
     const settings = await getSettings(strict, strict);
     return cindy.node.request({
       method,
@@ -246,6 +247,8 @@ function summarizeResult(tool, data) {
       if (data.canvas) return '已读取白板 ' + data.path + '（节点 ' + (data.nodes?.length || 0) + ' 个，连线 ' + (data.edges?.length || 0) + ' 条）。';
       return '已保存白板 ' + data.path + '（' + data.action + '，节点 ' + data.nodeCount + ' 个，连线 ' + data.edgeCount + ' 条）。';
     }
+    case 'confirmation_status':
+      return CONFIRMATION_STATE_TEXT[data.state] || '无法判断该确认的状态。';
     case 'open_in_obsidian':
       return '已向执行电脑上的 Obsidian 发送打开请求：' + (data.path || data.vault?.name || '');
     default:
@@ -278,6 +281,157 @@ function sendToolError(callId, message, errorCode = 'OBSIDIAN_ERROR', writeNotCo
   });
 }
 
+// Destructive operations asked for in a conversation are confirmed on a chat card. Cindy shows the
+// card wherever the task is open, including another computer or a phone, and only a real click on it
+// reaches this plugin. The tool call returns right away: other devices see a card only after that.
+const CONFIRM_ACTION_RE = /^obs:(ok|no):([a-f0-9]{32})$/;
+const CONFIRM_CARDS = {
+  delete_note: { title: '移入回收站？', effect: '笔记会移到知识库的 .trash 文件夹。', button: '移入回收站', done: '已移入回收站' },
+  write_note: { title: '覆盖这篇笔记？', effect: '原有的全部内容会被替换。', button: '确认覆盖', done: '已覆盖笔记' },
+  canvas_ops: { title: '整板替换这个白板？', effect: '原有的全部节点和连线会被替换。', button: '确认替换', done: '已替换白板' },
+};
+const CONFIRMATION_STATE_TEXT = {
+  pending: '用户还没有点确认卡片，操作尚未执行。',
+  executing: '用户已确认，正在执行。',
+  done: '用户已确认，操作已完成。',
+  cancelled: '用户点了取消，没有做任何修改。',
+  expired: '确认已过期，没有做任何修改。',
+  failed: '用户已确认，但操作没有执行。',
+  unconfirmed: '用户已确认，但执行结果无法确认，请核对目标文件。',
+  missing: '找不到这个确认记录。',
+};
+const settlingConfirmations = new Set();
+
+const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, (char) =>
+  ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
+
+const CARD_MUTED = 'color:var(--text-secondary,#77776f);font-size:12px;';
+const CARD_BUTTON = 'padding:7px 16px;border-radius:8px;font-size:13px;cursor:pointer;border:1px solid var(--border-default,#d9d9d4);background:transparent;color:var(--text-primary,#1a1a1a);';
+
+function cardShell(title, rows) {
+  return '<div style="padding:14px 16px;font-size:13px;line-height:1.55;color:var(--text-primary,#1a1a1a);overflow-wrap:anywhere;">' +
+    '<div style="font-size:14px;font-weight:600;">' + escapeHtml(title) + '</div>' + rows + '</div>';
+}
+
+function cardTarget(vaultName, filePath) {
+  return '<div style="margin-top:6px;">知识库「' + escapeHtml(vaultName) + '」</div>' +
+    '<div><code>' + escapeHtml(filePath) + '</code></div>';
+}
+
+function confirmationCard(request) {
+  const kind = CONFIRM_CARDS[request.tool];
+  const preview = request.preview || {};
+  let detail = '';
+  if (request.tool === 'write_note') {
+    detail = '<div style="margin-top:6px;' + CARD_MUTED + '">新内容 ' + escapeHtml(preview.chars) + ' 字' +
+      (preview.excerpt ? '，开头如下：' : '（空白）') + '</div>' +
+      (preview.excerpt ? '<pre style="margin:4px 0 0;max-height:96px;overflow:hidden;white-space:pre-wrap;font-size:12px;">' +
+        escapeHtml(preview.excerpt) + (preview.chars > preview.excerpt.length ? '…' : '') + '</pre>' : '');
+  } else if (request.tool === 'canvas_ops') {
+    detail = '<div style="margin-top:6px;' + CARD_MUTED + '">新白板：' + escapeHtml(preview.nodes) + ' 个节点，' +
+      escapeHtml(preview.edges) + ' 条连线</div>';
+  }
+  const button = (verb, label, extra) => '<button data-ghost-action="obs:' + verb + ':' + escapeHtml(request.confirmationId) +
+    '" aria-label="' + escapeHtml(label) + '"' + (verb === 'ok' ? ' data-ghost-primary=""' : '') +
+    ' style="' + CARD_BUTTON + (extra || '') + '">' + escapeHtml(label) + '</button>';
+  return cardShell(kind.title, cardTarget(request.vault.name, request.path) +
+    '<div style="margin-top:4px;">' + escapeHtml(kind.effect) + '</div>' + detail +
+    '<div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:12px;">' +
+    button('ok', kind.button, 'font-weight:600;border-color:var(--text-primary,#1a1a1a);') + button('no', '取消') + '</div>' +
+    '<div style="margin-top:8px;' + CARD_MUTED + '">尚未执行。10 分钟内有效。知识库所在电脑：' +
+    escapeHtml(request.executionHost) + '</div>');
+}
+
+function outcomeCard(outcome) {
+  const kind = CONFIRM_CARDS[outcome.tool];
+  const result = outcome.result || {};
+  const views = {
+    done: [kind?.done || '已完成', result.trashFile ? '回收站中的文件：' + result.trashFile
+      : (result.nodeCount !== undefined ? result.nodeCount + ' 个节点，' + result.edgeCount + ' 条连线' : '')],
+    cancelled: ['已取消', '没有做任何修改。'],
+    expired: ['确认已过期', '没有做任何修改。需要的话，请让 Cindy 重新发起。'],
+    failed: ['没有执行', outcome.message || '请让 Cindy 重新发起。'],
+    unconfirmed: ['结果未确认', '请在知识库中核对目标文件，再决定是否重试。'],
+    missing: ['确认已失效', '找不到这个待确认的操作。需要的话，请让 Cindy 重新发起。'],
+  };
+  const [title, detail] = views[outcome.state] || views.unconfirmed;
+  return cardShell(title, (outcome.path ? cardTarget(outcome.vaultName, outcome.path) : '') +
+    (detail ? '<div style="margin-top:6px;' + CARD_MUTED + '">' + escapeHtml(detail) + '</div>' : ''));
+}
+
+// Returns { asked: true } once the tool result is sent, or the checked target when nothing needs asking.
+async function askForConfirmation(callId, tool, args) {
+  const res = await callWorker('request_confirmation', { tool, args, cardCallId: callId }, callId);
+  if (!res.ok) {
+    const { code, msg: errText } = extractWorkerError(res, '无法核验目标路径。');
+    await sendToolError(callId, errText, code);
+    return { asked: true };
+  }
+  const request = res.result;
+  if (!request.required) return { asked: false, vault: request.vault.id, path: request.path };
+  await cindy.send({
+    type: 'card-update',
+    callId,
+    v: 2,
+    html: confirmationCard(request),
+    height: tool === 'write_note' ? 300 : 210,
+  });
+  const kind = CONFIRM_CARDS[tool];
+  await sendSuccess(callId,
+    '尚未执行。对话里已放出确认卡片（' + kind.title + ' 知识库「' + request.vault.name + '」中的 ' + request.path + '）。' +
+    '请让用户在正在使用的设备上点卡片里的按钮，10 分钟内有效。不要重复调用本工具，也不要替用户操作卡片。' +
+    '用户说点过之后，用 confirmation_status 核对结果：confirmationId=' + request.confirmationId,
+    {
+      status: 'awaiting_confirmation',
+      committed: false,
+      confirmationId: request.confirmationId,
+      expiresAt: new Date(request.expiresAt).toISOString(),
+      vault: { id: request.vault.id, name: request.vault.name },
+      path: request.path,
+    });
+  return { asked: true };
+}
+
+async function handleCardAction(msg) {
+  const match = CONFIRM_ACTION_RE.exec(typeof msg.actionId === 'string' ? msg.actionId : '');
+  if (!match || typeof msg.callId !== 'string' || !msg.callId) return;
+  const [, verb, confirmationId] = match;
+  // A second click while the first is running changes nothing.
+  if (settlingConfirmations.has(confirmationId)) return;
+  settlingConfirmations.add(confirmationId);
+  try {
+    let outcome;
+    let failure = '';
+    try {
+      const res = await callWorker('resolve_confirmation', {
+        confirmationId, cardCallId: msg.callId, decision: verb === 'ok' ? 'confirm' : 'cancel',
+      });
+      if (res.ok) outcome = res.result;
+      else if (res.data?.errorCode === 'CONFIRMATION_MISMATCH') return;
+      else failure = res.message || '';
+    } catch (err) {
+      failure = err?.message || '';
+    }
+    if (!outcome) {
+      const status = await callWorker('confirmation_status', { confirmationId }).catch(() => null);
+      outcome = status?.ok ? { ...status.result } : { state: 'unconfirmed' };
+      // Still waiting means nothing was claimed, so nothing in the vault changed.
+      if (outcome.state === 'pending') outcome = { ...outcome, state: 'failed', message: failure + ' 请让 Cindy 重新发起。' };
+    }
+    if (outcome.state === 'executing') return;
+    await cindy.send({
+      type: 'card-update',
+      callId: msg.callId,
+      v: 2,
+      state: 'done',
+      html: outcomeCard(outcome),
+      height: 120,
+    });
+  } finally {
+    settlingConfirmations.delete(confirmationId);
+  }
+}
+
 const CONFIRM_BUTTON_MAX = 12;
 const CONFIRM_RETRY_CODES = new Set(['BUSY', 'RATE_LIMITED', 'UNAVAILABLE']);
 
@@ -296,6 +450,25 @@ async function confirmWithRetry(spec) {
     answer = await cindy.confirm(request).catch(() => null);
   }
   return answer;
+}
+
+async function registerVault(callId, picked) {
+  const latest = await getSettings(true);
+  const prevList = Array.isArray(latest.custom_vaults)
+    ? [...latest.custom_vaults]
+    : (Array.isArray(latest.customVaults) ? [...latest.customVaults] : []);
+  if (picked.path && !prevList.some((v) => (typeof v === 'string' ? v : v && v.path) === picked.path)) {
+    prevList.push({ name: picked.name || 'Vault', path: picked.path });
+  }
+  await serializeWrite(() => patchSettings({
+    default_vault: picked.path || latest.default_vault || '',
+    custom_vaults: prevList,
+    defaultVault: undefined,
+    customVaults: undefined,
+  }));
+  const statusRes = await callWorker('vault_status', { vault: picked.path, refresh: true }, callId);
+  const data = statusRes.ok ? statusRes.result : { picked, scanWarning: statusRes.message };
+  await sendSuccess(callId, '已添加并切换默认知识库为：' + (picked.name || picked.path), data);
 }
 
 async function openWithDefaultApp(file) {
@@ -403,6 +576,10 @@ async function handleOpenFile(msg) {
 }
 
 cindy.onHostMessage(async function (msg) {
+  if (msg?.type === 'event' && msg.name === 'card-action') {
+    await handleCardAction(msg).catch(() => {});
+    return;
+  }
   if (msg?.type === 'event' && msg.name === 'open-file') {
     // The dialog can stay open for minutes; do not hold up other host messages.
     void handleOpenFile(msg).catch(() => {});
@@ -516,32 +693,43 @@ cindy.onHostMessage(async function (msg) {
         const code = picked?.errorCode || 'PICK_FAILED';
         const msgText = code === 'CANCELLED'
           ? '已取消目录选择。'
-          : '无法打开系统目录选择器，请到运行本插件的电脑上添加知识库。';
+          : '无法打开系统目录选择器。可以在工作台改为输入知识库文件夹路径。';
         await sendToolError(callId, msgText, code);
         return;
       }
-      const latest = await getSettings(true);
-      const prevList = Array.isArray(latest.custom_vaults)
-        ? [...latest.custom_vaults]
-        : (Array.isArray(latest.customVaults) ? [...latest.customVaults] : []);
-      if (picked.path && !prevList.some((v) => (typeof v === 'string' ? v : v && v.path) === picked.path)) {
-        prevList.push({ name: picked.name || 'Vault', path: picked.path });
+      await registerVault(callId, picked);
+      return;
+    }
+
+    if (tool === 'add_vault_path') {
+      const checked = await callWorker('inspect_vault_dir', { path: args.path }, callId);
+      if (!checked.ok) {
+        const error = extractWorkerError(checked, '无法核验这个文件夹。');
+        await sendToolError(callId, error.msg, error.code);
+        return;
       }
-      await serializeWrite(() => patchSettings({
-        default_vault: picked.path || latest.default_vault || '',
-        custom_vaults: prevList,
-        defaultVault: undefined,
-        customVaults: undefined,
-      }));
-      const statusRes = await callWorker('vault_status', { vault: picked.path, refresh: true }, callId);
-      const data = statusRes.ok ? statusRes.result : { picked, scanWarning: statusRes.message };
-      await sendSuccess(callId, '已添加并切换默认知识库为：' + (picked.name || picked.path), data);
+      const folder = checked.result;
+      // The workbench shows the resolved folder first; only that exact folder can then be added.
+      if (args.confirmed !== true) {
+        await sendSuccess(callId, '请在工作台确认要添加的知识库文件夹。', { pending: folder });
+        return;
+      }
+      if (args.path !== folder.path) {
+        await sendToolError(callId, '文件夹位置与确认时不同，请重新检查路径。', 'CONFIRMATION_REQUIRED');
+        return;
+      }
+      await registerVault(callId, folder);
       return;
     }
 
     if (tool === 'set_vault_write_policy') {
       if (typeof args.restrictFolders !== 'boolean' || !Array.isArray(args.folders)) {
         await sendToolError(callId, '请选择有效的写入范围。', 'INVALID_WRITE_POLICY');
+        return;
+      }
+      // Only the workbench can call this tool, after its own confirmation step.
+      if (args.confirmed !== true) {
+        await sendToolError(callId, '请重新打开工作台，确认后再保存写入规则。', 'CONFIRMATION_REQUIRED');
         return;
       }
       const checked = await callWorker('inspect_vault_write_policy', {
@@ -554,16 +742,6 @@ cindy.onHostMessage(async function (msg) {
         return;
       }
       const { vault, policy } = checked.result;
-      const scope = policy.readOnly ? '只读' : policy.writeFolders === null ? '允许写入全库' :
-        policy.writeFolders.length ? '仅允许写入 ' + policy.writeFolders.length + ' 个指定目录' : '不允许写入任何目录';
-      const confirmation = await cindy.confirm({
-        body: '更新执行电脑上知识库「' + vault.name + '」的插件写入规则：' + scope + '？',
-        confirmText: '保存规则',
-      });
-      if (!confirmation?.ok || !confirmation.confirmed) {
-        await sendToolError(callId, '写入规则未更改。', 'CONFIRMATION_DECLINED');
-        return;
-      }
       await serializeWrite(() => patchSettings((settings) => ({
         vault_write_policies: { ...settings.vault_write_policies, [vault.path]: policy },
       })));
@@ -609,31 +787,12 @@ cindy.onHostMessage(async function (msg) {
       const mode = args.mode || 'create';
       let boundVaultId = args.vault;
       let boundPath = args.path;
-      let expectedMtimeMs = null;
 
       if (mode === 'overwrite') {
-        const inspectRes = await callWorker('inspect_write_target', { vault: args.vault, path: args.path, ext: '.md' }, callId);
-        if (!inspectRes.ok) {
-          const { code, msg: errText } = extractWorkerError(inspectRes, '无法核验目标笔记路径。');
-          await sendToolError(callId, errText, code);
-          return;
-        }
-        const target = inspectRes.result;
-        boundVaultId = target.vault.id;
-        boundPath = target.path;
-        expectedMtimeMs = target.mtimeMs;
-        if (target.exists) {
-          const conf = await cindy.confirm({
-            body: '整篇覆盖知识库「' + target.vault.name + '」中已有笔记「' + target.path + '」的全部内容？',
-            confirmText: '确认覆盖',
-            cancelText: '取消',
-            danger: true,
-          });
-          if (!conf || !conf.ok || !conf.confirmed) {
-            await sendToolError(callId, '用户未确认该覆盖操作，笔记保持原样未修改。', 'CONFIRMATION_DECLINED');
-            return;
-          }
-        }
+        const confirmation = await askForConfirmation(callId, 'write_note', { ...args, mode });
+        if (confirmation.asked) return;
+        boundVaultId = confirmation.vault;
+        boundPath = confirmation.path;
       }
 
       const companion = mode === 'create' ? await companionContext(sessionContext?.session_id) : null;
@@ -643,7 +802,6 @@ cindy.onHostMessage(async function (msg) {
           ...args,
           vault: boundVaultId,
           path: boundPath,
-          ...(expectedMtimeMs !== null ? { expectedMtimeMs } : {}),
           ...(companion ? { _companion: companion } : {}),
         },
         callId
@@ -662,38 +820,7 @@ cindy.onHostMessage(async function (msg) {
     }
 
     if (tool === 'delete_note') {
-      const inspectRes = await callWorker('inspect_write_target', { vault: args.vault, path: args.path, ext: '.md' }, callId);
-      if (!inspectRes.ok) {
-        const { code, msg: errText } = extractWorkerError(inspectRes, '无法核验目标笔记路径。');
-        await sendToolError(callId, errText, code);
-        return;
-      }
-      const target = inspectRes.result;
-      if (!target.exists) {
-        await sendToolError(callId, '要移入回收站的笔记「' + target.path + '」在知识库「' + target.vault.name + '」中不存在。', 'NOTE_NOT_FOUND');
-        return;
-      }
-      const conf = await cindy.confirm({
-        body: '将知识库「' + target.vault.name + '」中的笔记「' + target.path + '」移入回收站 (.trash)？',
-        confirmText: '移入回收站',
-        cancelText: '取消',
-        danger: true,
-      });
-      if (!conf || !conf.ok || !conf.confirmed) {
-        await sendToolError(callId, '用户未确认移入回收站操作，笔记保持原样未修改。', 'CONFIRMATION_DECLINED');
-        return;
-      }
-      const res = await callWorker(
-        'delete_note',
-        { ...args, vault: target.vault.id, path: target.path, expectedMtimeMs: target.mtimeMs },
-        callId
-      );
-      if (!res.ok) {
-        const { code, msg: errText } = extractWorkerError(res, '移入回收站失败。');
-        await sendToolError(callId, errText, code, Boolean(res.data?.errorCode && code !== 'WRITE_OUTCOME_UNKNOWN'));
-        return;
-      }
-      await sendSuccess(callId, summarizeResult('delete_note', res.result), res.result);
+      await askForConfirmation(callId, 'delete_note', args);
       return;
     }
 
@@ -701,36 +828,17 @@ cindy.onHostMessage(async function (msg) {
       const action = args.action || 'list';
       let boundVaultId = args.vault;
       let boundPath = args.path;
-      let expectedMtimeMs = null;
 
       if (action === 'overwrite') {
-        const inspectRes = await callWorker('inspect_write_target', { vault: args.vault, path: args.path, ext: '.canvas' }, callId);
-        if (!inspectRes.ok) {
-          const { code, msg: errText } = extractWorkerError(inspectRes, '无法核验目标白板路径。');
-          await sendToolError(callId, errText, code);
-          return;
-        }
-        const target = inspectRes.result;
-        boundVaultId = target.vault.id;
-        boundPath = target.path;
-        expectedMtimeMs = target.mtimeMs;
-        if (target.exists) {
-          const conf = await cindy.confirm({
-            body: '整板替换知识库「' + target.vault.name + '」中已有白板「' + target.path + '」的全部节点与连线？',
-            confirmText: '确认替换',
-            cancelText: '取消',
-            danger: true,
-          });
-          if (!conf || !conf.ok || !conf.confirmed) {
-            await sendToolError(callId, '用户未确认替换已有白板，文件未修改。', 'CONFIRMATION_DECLINED');
-            return;
-          }
-        }
+        const confirmation = await askForConfirmation(callId, 'canvas_ops', { ...args, action });
+        if (confirmation.asked) return;
+        boundVaultId = confirmation.vault;
+        boundPath = confirmation.path;
       }
 
       const res = await callWorker(
         'canvas_ops',
-        { ...args, ...(boundVaultId ? { vault: boundVaultId } : {}), ...(boundPath ? { path: boundPath } : {}), ...(expectedMtimeMs !== null ? { expectedMtimeMs } : {}) },
+        { ...args, ...(boundVaultId ? { vault: boundVaultId } : {}), ...(boundPath ? { path: boundPath } : {}) },
         callId
       );
       if (!res.ok) {
@@ -752,6 +860,7 @@ cindy.onHostMessage(async function (msg) {
       'manage_tags',
       'daily_note',
       'write_receipt',
+      'confirmation_status',
       'graph_links',
       'open_in_obsidian',
     ]);

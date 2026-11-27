@@ -19,7 +19,7 @@
 
 插件源码位于 [`obsidian-vault/`](obsidian-vault/)：
 - [`ghost.json`](obsidian-vault/ghost.json)：声明插件元数据、14 个模型工具（`vault_status`、`list_files`、`search_notes`、`list_tags`、`read_note`、`write_note`、`replace_in_note`、`delete_note`、`manage_tags`、`daily_note`、`graph_links`、`canvas_ops`、`open_in_obsidian`、`open_workbench`）与 4 个工作台专用工具（`complete_notes`、`pick_vault_dir`、`write_receipt`、`set_vault_write_policy`）及权限。
-- [`main.js`](obsidian-vault/main.js)：调度工具调用、写入串行化与原生危险操作确认弹窗。
+- [`main.js`](obsidian-vault/main.js)：调度工具调用、写入串行化与危险操作的确认卡片。
 - [`node/worker.cjs`](obsidian-vault/node/worker.cjs) 与 [`node/write-receipts.cjs`](obsidian-vault/node/write-receipts.cjs)：零外部依赖的 Node 标准库工作进程，负责索引、原子读写与跨进程幂等回执。
 - [`ui/page.html`](obsidian-vault/ui/page.html) 与 [`settings.html`](obsidian-vault/settings.html)：工作台与设置页。
 

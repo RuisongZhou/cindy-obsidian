@@ -9,6 +9,7 @@ const { promisify } = require('node:util');
 const { TextDecoder } = require('node:util');
 const { prepareWrite, getWriteReceipt } = require('./write-receipts.cjs');
 const obsidianCli = require('./obsidian-cli.cjs');
+const { createConfirmation, confirmationStatus, takeConfirmation, settleConfirmation } = require('./confirmations.cjs');
 const { detectObsidianCli } = obsidianCli;
 
 const execFileAsync = promisify(execFile);
@@ -1665,7 +1666,141 @@ async function openWithDefaultApp(file) {
   }
 }
 
+// Operations that only run after the user clicks a confirmation card.
+const CONFIRMABLE = {
+  delete_note: { ext: '.md', applies: () => true, preview: () => ({}) },
+  write_note: {
+    ext: '.md',
+    applies: (args) => args.mode === 'overwrite',
+    preview: (args) => {
+      const content = typeof args.content === 'string' ? args.content : '';
+      return { chars: content.length, excerpt: content.slice(0, 240) };
+    },
+  },
+  canvas_ops: {
+    ext: '.canvas',
+    applies: (args) => args.action === 'overwrite',
+    preview: (args) => ({
+      nodes: Array.isArray(args.nodes) ? args.nodes.length : 0,
+      edges: Array.isArray(args.edges) ? args.edges.length : 0,
+    }),
+  },
+};
+
+const executionHostName = () => os.hostname().replace(/[\u0000-\u001f\u007f-\u009f]/g, '').trim().slice(0, 120);
+
+function confirmationOutcome(result = {}) {
+  const kept = {};
+  for (const key of ['action', 'path', 'trashFile', 'bytesWritten', 'nodeCount', 'edgeCount']) {
+    if (result[key] !== undefined) kept[key] = result[key];
+  }
+  return kept;
+}
+
 const handlers = {
+  async request_confirmation(params = {}) {
+    const spec = Object.hasOwn(CONFIRMABLE, params.tool) ? CONFIRMABLE[params.tool] : null;
+    const args = params.args && typeof params.args === 'object' && !Array.isArray(params.args) ? params.args : null;
+    if (!spec || !args || !spec.applies(args) || typeof params.cardCallId !== 'string' || !params.cardCallId) {
+      throw makeError('INVALID_CONFIRMATION_REQUEST', '无法为该操作创建确认请求。');
+    }
+    // Rejects read-only vaults and folders outside the write rules before the user is asked.
+    const target = await handlers.inspect_write_target({ vault: args.vault, path: args.path, ext: spec.ext, settings: params.settings });
+    if (!target.exists) {
+      if (params.tool === 'delete_note') {
+        throw makeError('NOTE_NOT_FOUND', '要移入回收站的笔记「' + target.path + '」在知识库「' + target.vault.name + '」中不存在。');
+      }
+      return { required: false, vault: target.vault, path: target.path };
+    }
+    const { settings: _settings, _companion, ...rest } = args;
+    const preview = spec.preview(args);
+    const record = await createConfirmation({
+      tool: params.tool,
+      cardCallId: params.cardCallId,
+      vaultName: target.vault.name,
+      vaultPath: target.vault.path,
+      path: target.path,
+      // Bound to the file the user is shown: any later change to it cancels the operation.
+      params: { ...rest, vault: target.vault.id, path: target.path, expectedMtimeMs: target.mtimeMs },
+    });
+    return {
+      required: true,
+      confirmationId: record.id,
+      expiresAt: record.expiresAt,
+      tool: record.tool,
+      vault: target.vault,
+      path: target.path,
+      executionHost: executionHostName(),
+      preview,
+    };
+  },
+
+  // Only a click on the card reaches this: it is not exposed as a plugin tool.
+  async resolve_confirmation(params = {}) {
+    if (params.decision !== 'confirm' && params.decision !== 'cancel') {
+      throw makeError('INVALID_CONFIRMATION_REQUEST', '无效的确认选择。');
+    }
+    const claim = await takeConfirmation(params.confirmationId, params.cardCallId);
+    if (!claim.taken) return { handled: false, ...claim.status };
+    const { record } = claim;
+    const base = { handled: true, id: record.id, tool: record.tool, vaultName: record.vaultName, path: record.path };
+    const finish = async (state, extra) => {
+      // A failure to note the outcome must not hide what already happened to the vault.
+      await settleConfirmation(record, 'claimed', state, extra).catch(() => {});
+      return { ...base, ...extra, state };
+    };
+    if (params.decision === 'cancel') return finish('cancelled', {});
+    try {
+      const { vault } = resolveVault({ vault: record.params.vault, settings: params.settings });
+      if (vault.path !== record.vaultPath) {
+        throw makeError('WRITE_CONFLICT', '知识库位置在确认前发生了变化，未执行。');
+      }
+      const current = resolveSafeVaultTarget(vault.path, record.path, { requiredExt: CONFIRMABLE[record.tool].ext });
+      if (!current.exists) {
+        throw makeError('WRITE_CONFLICT', '目标在确认前已被移动或删除，未执行。');
+      }
+      const result = await handlers[record.tool]({
+        idempotencyKey: 'confirm-' + record.id,
+        ...record.params,
+        settings: params.settings,
+      });
+      return finish('done', { result: confirmationOutcome(result) });
+    } catch (err) {
+      const errorCode = (err && err.code) || 'WORKER_ERROR';
+      return finish(errorCode === 'WRITE_OUTCOME_UNKNOWN' ? 'unconfirmed' : 'failed', {
+        errorCode,
+        message: err && err.message ? err.message : '操作执行失败',
+      });
+    }
+  },
+
+  async confirmation_status(params = {}) {
+    const { cardCallId: _cardCallId, ...status } = await confirmationStatus(params.confirmationId);
+    return status;
+  },
+
+  // A folder typed in the workbench, for users who cannot reach this computer's folder picker.
+  async inspect_vault_dir(params = {}) {
+    let input = typeof params.path === 'string' ? params.path.trim() : '';
+    if (input === '~' || input.startsWith('~/')) input = path.join(os.homedir(), input.slice(1));
+    if (!input || input.length > 1024 || /[\u0000-\u001f\u007f]/.test(input) || !path.isAbsolute(input)) {
+      throw makeError('INVALID_VAULT_PATH', '请输入知识库文件夹的完整路径，例如 /Users/你/Documents/笔记。');
+    }
+    const real = safeRealpath(path.resolve(input));
+    let isDirectory = false;
+    try { isDirectory = Boolean(real) && fs.statSync(real).isDirectory(); } catch { isDirectory = false; }
+    if (!isDirectory) throw makeError('VAULT_PATH_NOT_FOUND', '知识库所在电脑上没有这个文件夹。');
+    if (path.parse(real).root === real || real === safeRealpath(os.homedir())) {
+      throw makeError('INVALID_VAULT_PATH', '不能把磁盘根目录或用户主目录添加为知识库。');
+    }
+    let isVault = false;
+    try { isVault = fs.lstatSync(path.join(real, '.obsidian')).isDirectory(); } catch { isVault = false; }
+    if (!isVault) {
+      throw makeError('NOT_AN_OBSIDIAN_VAULT', '这个文件夹里没有 .obsidian，不是 Obsidian 知识库。其他文件夹请在知识库所在电脑上用「添加知识库」选择。');
+    }
+    return { path: real, name: path.basename(real) };
+  },
+
   async inspect_vault_write_policy(params = {}) {
     const { vault } = resolveVault(params);
     const policy = params.policy === undefined ? vaultWritePolicy(vault, params.settings) : normalizeWritePolicy(params.policy);
@@ -1747,7 +1882,7 @@ const handlers = {
 
     return {
       activeVault: activeVault ? { id: activeVault.id, name: activeVault.name, path: activeVault.path, open: activeVault.open, source: activeVault.source, exists: activeVault.exists } : null,
-      executionHost: os.hostname().replace(/[\u0000-\u001f\u007f-\u009f]/g, '').trim().slice(0, 120),
+      executionHost: executionHostName(),
       writePolicy: activeVault ? vaultWritePolicy(activeVault, settings) : null,
       activeVaultError,
       vaults: vaults.map((v) => ({ id: v.id, name: v.name, path: v.path, open: v.open, source: v.source, exists: v.exists })),

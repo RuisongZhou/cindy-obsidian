@@ -332,27 +332,33 @@ test('write rules cover note, delete_note, daily, Canvas, and tag operations', a
   assert.deepEqual(await request('delete_note', { path: 'Inbox/New/Allowed.md', idempotencyKey: 'del-once', settings: restricted }), trashed);
 });
 
-test('the host confirms rule changes and delete_note, and fetches fresh rules before writes', async () => {
+test('rules and deletion are confirmed away from the host dialog, and writes fetch fresh rules', async () => {
   const vm = require('node:vm');
   const main = await fs.readFile(path.join(__dirname, '../obsidian-vault/main.js'), 'utf8');
   const vault = { id: 'test', name: 'Test vault', path: '/fixtures/test-vault' };
   let settings = { inbox_folder: 'Inbox' };
   let listener;
-  let confirmed = false;
   let offline = false;
   const dispatched = [];
-  const results = [];
+  const sent = [];
   vm.runInNewContext(main, {
     cindy: {
       onHostMessage: (handler) => { listener = handler; },
-      confirm: async () => ({ ok: true, confirmed }),
-      send: async (result) => results.push(result),
+      // A dialog would open on the plugin's own computer, so chat and workbench flows must not use it.
+      confirm: async () => assert.fail('no host dialog for chat or workbench confirmations'),
+      send: async (message) => sent.push(message),
       node: {
         async request({ method, params }) {
           dispatched.push({ method, params });
           if (method === 'inspect_vault_write_policy') return { ok: true, result: { vault, policy: params.policy } };
-          if (method === 'inspect_write_target') return { ok: true, result: { vault, path: params.path, exists: true, mtimeMs: 12345 } };
-          if (method === 'delete_note') return { ok: true, result: { action: 'moved_to_obsidian_trash', vault, path: params.path, trashFile: '.trash/Note.md' } };
+          if (method === 'request_confirmation') {
+            return { ok: true, result: { required: true, tool: params.tool, confirmationId: 'a'.repeat(32), expiresAt: Date.now() + 600000,
+              vault, path: params.args.path, executionHost: 'host', preview: {} } };
+          }
+          if (method === 'resolve_confirmation') {
+            return { ok: true, result: { handled: true, state: 'done', tool: 'delete_note', vaultName: vault.name, path: 'Note.md', result: { trashFile: '.trash/Note.md' } } };
+          }
+          if (method === 'confirmation_status') return { ok: true, result: { state: 'pending', tool: 'delete_note', vaultName: vault.name, path: 'Note.md' } };
           return { ok: false, message: 'Policy checked by worker.' };
         },
       },
@@ -365,21 +371,53 @@ test('the host confirms rule changes and delete_note, and fetches fresh rules be
     },
   });
   const invoke = (tool, args) => listener({ type: 'tool-call', tool, args, callId: 'fixture' });
+  const click = (actionId, callId = 'fixture') => listener({ type: 'event', name: 'card-action', callId, actionId });
+  const lastResult = () => sent.filter((message) => message.type === 'tool-result').at(-1).result;
+  const count = (method) => dispatched.filter((item) => item.method === method).length;
+
   const proposed = { vault: vault.id, readOnly: true, restrictFolders: true, folders: ['Inbox'] };
   await invoke('set_vault_write_policy', proposed);
-  assert.equal(results.at(-1).result.structuredContent.errorCode, 'CONFIRMATION_DECLINED');
+  assert.equal(lastResult().structuredContent.errorCode, 'CONFIRMATION_REQUIRED');
   assert.equal(settings.vault_write_policies, undefined);
-  confirmed = true;
-  await invoke('set_vault_write_policy', proposed);
+  await invoke('set_vault_write_policy', { ...proposed, confirmed: true });
   assert.deepEqual(settings.vault_write_policies[vault.path], { readOnly: true, writeFolders: ['Inbox'] });
   assert.equal(settings.inbox_folder, 'Inbox');
 
-  confirmed = false;
+  sent.length = 0;
   await invoke('delete_note', { vault: vault.id, path: 'Note.md' });
-  assert.equal(results.at(-1).result.structuredContent.errorCode, 'CONFIRMATION_DECLINED');
-  confirmed = true;
-  await invoke('delete_note', { vault: vault.id, path: 'Note.md' });
-  assert.equal(results.at(-1).result.structuredContent.action, 'moved_to_obsidian_trash');
+  // The card goes out before the result, which returns without waiting for a click.
+  assert.deepEqual(sent.map((message) => message.type), ['card-update', 'tool-result']);
+  assert.equal(sent[0].callId, 'fixture');
+  assert.deepEqual([...sent[0].html.matchAll(/data-ghost-action="([^"]+)"/g)].map((match) => match[1]),
+    ['obs:ok:' + 'a'.repeat(32), 'obs:no:' + 'a'.repeat(32)]);
+  assert.equal(lastResult().structuredContent.status, 'awaiting_confirmation');
+  assert.equal(lastResult().structuredContent.committed, false);
+  assert.equal(count('delete_note'), 0);
+  assert.equal(count('resolve_confirmation'), 0);
+
+  await click('obs:ok:not-an-id');
+  await click('something-else');
+  assert.equal(count('resolve_confirmation'), 0);
+
+  // Rules cannot be read: nothing is claimed and the card says nothing ran.
+  offline = true;
+  sent.length = 0;
+  await click('obs:ok:' + 'a'.repeat(32));
+  assert.equal(count('resolve_confirmation'), 0);
+  assert.match(sent.at(-1).html, /没有执行/);
+  assert.doesNotMatch(sent.at(-1).html, /data-ghost-action/);
+  offline = false;
+
+  sent.length = 0;
+  await Promise.all([click('obs:ok:' + 'a'.repeat(32)), click('obs:ok:' + 'a'.repeat(32))]);
+  assert.equal(count('resolve_confirmation'), 1);
+  const resolved = dispatched.find((item) => item.method === 'resolve_confirmation');
+  assert.equal(resolved.params.cardCallId, 'fixture');
+  assert.equal(resolved.params.decision, 'confirm');
+  assert.deepEqual(resolved.params.settings.vault_write_policies[vault.path], { readOnly: true, writeFolders: ['Inbox'] });
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].state, 'done');
+  assert.match(sent[0].html, /已移入回收站/);
 
   settings = { ...settings, vault_write_policies: { [vault.path]: { readOnly: false, writeFolders: [] } } };
   await invoke('write_note', { path: 'Blocked.md', content: 'fixture' });
@@ -388,7 +426,211 @@ test('the host confirms rule changes and delete_note, and fetches fresh rules be
   const callsBeforeFailure = dispatched.length;
   await invoke('write_note', { path: 'Blocked.md', content: 'fixture' });
   assert.equal(dispatched.length, callsBeforeFailure);
-  assert.equal(results.at(-1).result.isError, true);
+  assert.equal(lastResult().isError, true);
+});
+
+const confirmationDirectory = (home) => path.join(home,
+  ...(process.platform === 'darwin' ? ['Library', 'Application Support'] : []), 'Cindy Obsidian Vault', 'confirmations');
+
+async function confirmationFixture(t, prefix) {
+  const fixture = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
+  const home = path.join(fixture, 'home');
+  await fs.mkdir(path.join(fixture, 'vault'));
+  await fs.mkdir(home);
+  const vault = await fs.realpath(path.join(fixture, 'vault'));
+  t.after(() => fs.rm(fixture, { recursive: true, force: true }));
+  const request = vaultWorker(t, vault, { home });
+  const vaultId = (await request('vault_status')).activeVault.id;
+  const ask = (tool, args, cardCallId = 'card-1') => request('request_confirmation', { tool, args: { vault: vaultId, ...args }, cardCallId });
+  const decide = (confirmationId, decision = 'confirm', extra = {}) =>
+    request('resolve_confirmation', { confirmationId, cardCallId: 'card-1', decision, ...extra });
+  const read = (name) => fs.readFile(path.join(vault, name), 'utf8');
+  return { fixture, home, vault, vaultId, request, ask, decide, read };
+}
+
+test('a confirmed operation runs once, only from its own card', async (t) => {
+  const { home, vault, vaultId, request, ask, decide, read } = await confirmationFixture(t, 'obsidian-confirm-');
+  await fs.writeFile(path.join(vault, 'Gone.md'), 'delete me\n');
+  await fs.writeFile(path.join(vault, 'Old.md'), 'old body\n');
+  await fs.writeFile(path.join(vault, 'Board.canvas'), JSON.stringify({ nodes: [], edges: [] }));
+
+  const removal = await ask('delete_note', { path: 'Gone.md' });
+  assert.equal(removal.required, true);
+  assert.equal(await read('Gone.md'), 'delete me\n');
+  assert.equal(await decide(removal.confirmationId, 'confirm', { cardCallId: 'another-card' }), 'CONFIRMATION_MISMATCH');
+  assert.equal((await request('confirmation_status', { confirmationId: removal.confirmationId })).state, 'pending');
+
+  // Two execution processes receiving the same click: exactly one runs it.
+  const second = vaultWorker(t, vault, { home });
+  const params = { confirmationId: removal.confirmationId, cardCallId: 'card-1', decision: 'confirm' };
+  const outcomes = await Promise.all([request('resolve_confirmation', params), second('resolve_confirmation', params)]);
+  assert.equal(outcomes.filter((outcome) => outcome.handled).length, 1);
+  assert.equal(outcomes.find((outcome) => outcome.handled).state, 'done');
+  await assert.rejects(read('Gone.md'), { code: 'ENOENT' });
+  assert.equal((await fs.readdir(path.join(vault, '.trash'))).length, 1);
+  const again = await decide(removal.confirmationId);
+  assert.deepEqual([again.handled, again.state], [false, 'done']);
+
+  const overwrite = await ask('write_note', { path: 'Old.md', mode: 'overwrite', content: 'PRIVATE new body C:\\temp\\new\n' });
+  assert.equal(overwrite.preview.chars, 'PRIVATE new body C:\\temp\\new\n'.length);
+  assert.equal(await read('Old.md'), 'old body\n');
+  assert.equal((await decide(overwrite.confirmationId)).state, 'done');
+  assert.equal(await read('Old.md'), 'PRIVATE new body C:\\temp\\new\n');
+
+  const board = await ask('canvas_ops', { path: 'Board.canvas', action: 'overwrite', nodes: [{ id: 'a', type: 'text', text: 'PRIVATE node' }] });
+  assert.deepEqual(board.preview, { nodes: 1, edges: 0 });
+  assert.equal((await decide(board.confirmationId)).state, 'done');
+  assert.match(await read('Board.canvas'), /PRIVATE node/);
+
+  // Settled records keep the outcome, never the content that was waiting.
+  const directory = confirmationDirectory(home);
+  const stored = await fs.readdir(directory);
+  assert.equal(stored.length, 3);
+  assert.ok(stored.every((name) => name.endsWith('.done.json')), stored.join(','));
+  for (const name of stored) assert.doesNotMatch(await fs.readFile(path.join(directory, name), 'utf8'), /PRIVATE/);
+
+  // A new target needs no question; a delete of a missing note is refused outright.
+  assert.equal((await ask('write_note', { path: 'Fresh.md', mode: 'overwrite', content: 'x' })).required, false);
+  assert.equal(await ask('delete_note', { path: 'Gone.md' }), 'NOTE_NOT_FOUND');
+  assert.equal(await ask('write_note', { path: 'Old.md', mode: 'append', content: 'x' }), 'INVALID_CONFIRMATION_REQUEST');
+  assert.equal(await ask('daily_note', { action: 'append', content: 'x' }), 'INVALID_CONFIRMATION_REQUEST');
+  assert.equal(await request('resolve_confirmation', { confirmationId: '../escape', cardCallId: 'card-1', decision: 'confirm' }), 'CONFIRMATION_NOT_FOUND');
+  assert.equal((await request('confirmation_status', { vault: vaultId, confirmationId: 'f'.repeat(32) })).state, 'missing');
+});
+
+test('a confirmation is dropped when cancelled, expired, outdated or no longer allowed', async (t) => {
+  const { home, vault, vaultId, request, ask, decide, read } = await confirmationFixture(t, 'obsidian-confirm-guard-');
+  const note = path.join(vault, 'Keep.md');
+  const reset = () => fs.writeFile(note, 'original\n');
+  const state = async (id) => (await request('confirmation_status', { confirmationId: id })).state;
+
+  await reset();
+  const cancelled = await ask('delete_note', { path: 'Keep.md' });
+  assert.equal((await decide(cancelled.confirmationId, 'cancel')).state, 'cancelled');
+  assert.deepEqual([(await decide(cancelled.confirmationId)).handled, await state(cancelled.confirmationId)], [false, 'cancelled']);
+  assert.equal(await read('Keep.md'), 'original\n');
+
+  const expired = await ask('delete_note', { path: 'Keep.md' });
+  const file = path.join(confirmationDirectory(home), expired.confirmationId + '.pending.json');
+  await fs.writeFile(file, JSON.stringify({ ...JSON.parse(await fs.readFile(file, 'utf8')), expiresAt: Date.now() - 1 }));
+  assert.deepEqual([(await decide(expired.confirmationId)).handled, await state(expired.confirmationId)], [false, 'expired']);
+  assert.equal(await read('Keep.md'), 'original\n');
+
+  const edited = await ask('write_note', { path: 'Keep.md', mode: 'overwrite', content: 'replacement\n' });
+  await fs.writeFile(note, 'edited while waiting\n');
+  await fs.utimes(note, new Date(), new Date(Date.now() + 5000));
+  const conflict = await decide(edited.confirmationId);
+  assert.deepEqual([conflict.state, conflict.errorCode], ['failed', 'WRITE_CONFLICT']);
+  assert.equal(await read('Keep.md'), 'edited while waiting\n');
+
+  await reset();
+  const removed = await ask('write_note', { path: 'Keep.md', mode: 'overwrite', content: 'replacement\n' });
+  await fs.unlink(note);
+  assert.equal((await decide(removed.confirmationId)).errorCode, 'WRITE_CONFLICT');
+  await assert.rejects(read('Keep.md'), { code: 'ENOENT' });
+
+  await reset();
+  const locked = await ask('delete_note', { path: 'Keep.md' });
+  const readOnly = { custom_vaults: [vault], vault_write_policies: { [vault]: { readOnly: true, writeFolders: null } } };
+  const refused = await decide(locked.confirmationId, 'confirm', { settings: readOnly });
+  assert.deepEqual([refused.state, refused.errorCode], ['failed', 'VAULT_READ_ONLY']);
+  assert.equal(await read('Keep.md'), 'original\n');
+  // A read-only vault is refused before anyone is asked.
+  assert.equal(await request('request_confirmation', { tool: 'delete_note', args: { vault: vaultId, path: 'Keep.md' }, cardCallId: 'card-1', settings: readOnly }), 'VAULT_READ_ONLY');
+});
+
+test('chat tool calls, card clicks and the vault stay consistent end to end', async (t) => {
+  const vm = require('node:vm');
+  const { vault, request, read } = await confirmationFixture(t, 'obsidian-confirm-e2e-');
+  const hostile = 'x"><button data-ghost-action="obs:ok:' + 'b'.repeat(32) + '">.md';
+  await fs.writeFile(path.join(vault, hostile), 'old\n');
+  let listener;
+  const sent = [];
+  let queue = Promise.resolve();
+  vm.runInNewContext(await fs.readFile(path.join(__dirname, '../obsidian-vault/main.js'), 'utf8'), {
+    cindy: {
+      onHostMessage: (handler) => { listener = handler; },
+      confirm: async () => assert.fail('no host dialog'),
+      send: async (message) => sent.push(message),
+      node: {
+        request({ method, params }) {
+          const run = queue.then(() => request(method, JSON.parse(JSON.stringify(params))));
+          queue = run.catch(() => {});
+          return run.then((result) => (typeof result === 'string'
+            ? { ok: false, message: result, data: { errorCode: result } }
+            : { ok: true, result }));
+        },
+      },
+    },
+    fetch: async () => ({ ok: true, json: async () => ({ custom_vaults: [vault] }) }),
+  });
+  const content = '<img src=x onerror=alert(1)> <button data-ghost-action="obs:ok:' + 'c'.repeat(32) + '">go</button>';
+  await listener({ type: 'tool-call', tool: 'write_note', args: { path: hostile, mode: 'overwrite', content }, callId: 'call-e2e' });
+  const [card, result] = sent;
+  // Neither the file name nor the new content can add buttons or markup to the card.
+  assert.equal(card.html.match(/<button\b/g).length, 2);
+  assert.doesNotMatch(card.html, /<img/);
+  const id = result.result.structuredContent.confirmationId;
+  assert.equal(result.result.structuredContent.status, 'awaiting_confirmation');
+  assert.equal(await read(hostile), 'old\n');
+
+  sent.length = 0;
+  await listener({ type: 'event', name: 'card-action', callId: 'some-other-call', actionId: 'obs:ok:' + id });
+  assert.equal(sent.length, 0);
+  assert.equal(await read(hostile), 'old\n');
+  await listener({ type: 'event', name: 'card-action', callId: 'call-e2e', actionId: 'obs:ok:' + id, mobilePageId: 'remote-page' });
+  assert.equal(await read(hostile), content + '\n');
+  assert.match(sent.at(-1).html, /已覆盖笔记/);
+
+  sent.length = 0;
+  await listener({ type: 'tool-call', tool: 'confirmation_status', args: { confirmationId: id }, callId: 'status' });
+  assert.equal(sent.at(-1).result.structuredContent.state, 'done');
+  assert.equal(sent.at(-1).result.structuredContent.cardCallId, undefined);
+});
+
+test('a typed vault path is checked first and added only after the page confirms it', async (t) => {
+  const { fixture, request } = await confirmationFixture(t, 'obsidian-add-path-');
+  const real = await fs.realpath(fixture);
+  const folder = path.join(real, 'Second vault');
+  await fs.mkdir(path.join(folder, '.obsidian'), { recursive: true });
+  assert.deepEqual(await request('inspect_vault_dir', { path: folder + '/' }), { path: folder, name: 'Second vault' });
+  assert.equal(await request('inspect_vault_dir', { path: path.join(real, 'vault') }), 'NOT_AN_OBSIDIAN_VAULT');
+  assert.equal(await request('inspect_vault_dir', { path: 'relative/folder' }), 'INVALID_VAULT_PATH');
+  assert.equal(await request('inspect_vault_dir', { path: path.parse(real).root }), 'INVALID_VAULT_PATH');
+  assert.equal(await request('inspect_vault_dir', { path: '~' }), 'INVALID_VAULT_PATH');
+  assert.equal(await request('inspect_vault_dir', { path: path.join(real, 'missing') }), 'VAULT_PATH_NOT_FOUND');
+
+  const vm = require('node:vm');
+  let listener;
+  let settings = {};
+  const sent = [];
+  vm.runInNewContext(await fs.readFile(path.join(__dirname, '../obsidian-vault/main.js'), 'utf8'), {
+    cindy: {
+      onHostMessage: (handler) => { listener = handler; },
+      send: async (message) => sent.push(message),
+      node: {
+        async request({ method, params }) {
+          if (method === 'inspect_vault_dir') return { ok: true, result: { path: folder, name: 'Second vault' } };
+          return { ok: true, result: { activeVault: { path: params.vault } } };
+        },
+      },
+    },
+    fetch: async (_endpoint, options) => {
+      if (options?.method === 'PUT') settings = JSON.parse(options.body);
+      return { ok: true, json: async () => settings };
+    },
+  });
+  const add = async (args) => {
+    await listener({ type: 'tool-call', tool: 'add_vault_path', args, callId: 'page' });
+    return sent.at(-1).result.structuredContent;
+  };
+  assert.deepEqual(JSON.parse(JSON.stringify((await add({ path: folder })).pending)), { path: folder, name: 'Second vault' });
+  assert.equal(settings.custom_vaults, undefined);
+  assert.equal((await add({ path: folder + '/../elsewhere', confirmed: true })).errorCode, 'CONFIRMATION_REQUIRED');
+  assert.equal(settings.custom_vaults, undefined);
+  await add({ path: folder, confirmed: true });
+  assert.equal(settings.default_vault, folder);
+  assert.deepEqual(JSON.parse(JSON.stringify(settings.custom_vaults)), [{ name: 'Second vault', path: folder }]);
 });
 
 test('manifest tools, visibility declarations, and all locale files stay strictly aligned', async () => {

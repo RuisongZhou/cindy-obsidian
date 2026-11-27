@@ -110,13 +110,13 @@
       }
     },
     "write_note": {
-      "description": "Create a note or perform structured edits: overwrite, append/prepend, heading or ^block edits, and non-tag YAML frontmatter updates. In a partner conversation, a new note with no folder (or in the inbox) goes into that partner's own folder; the result returns the actual path. Use replace_in_note for literal text replacement, manage_tags for existing note tags, delete_note to move to trash, and daily_note for Daily Notes. Overwriting an existing note requires confirmation.",
+      "description": "Create a note or perform structured edits: overwrite, append/prepend, heading or ^block edits, and non-tag YAML frontmatter updates. In a partner conversation, a new note with no folder (or in the inbox) goes into that partner's own folder; the result returns the actual path. Use replace_in_note for literal text replacement, manage_tags for existing note tags, delete_note to move to trash, and daily_note for Daily Notes. Overwriting an existing note does not run right away: a confirmation card appears in the conversation (status=\"awaiting_confirmation\") and the plugin writes only after the user clicks it.",
       "parameters": {
         "/properties/path": {
           "description": "Target vault-relative .md path (auto-appends .md if omitted)."
         },
         "/properties/mode": {
-          "description": "Write mode (default create): create, overwrite (confirmation required), append/prepend, append-heading/prepend-heading/replace-section (with heading or headingPath), append-block/prepend-block/replace-block (with blockId), or update-frontmatter (non-tag properties)."
+          "description": "Write mode (default create): create, overwrite (runs after the user clicks the confirmation card), append/prepend, append-heading/prepend-heading/replace-section (with heading or headingPath), append-block/prepend-block/replace-block (with blockId), or update-frontmatter (non-tag properties)."
         },
         "/properties/heading": {
           "description": "Target heading for heading write modes (creates a new ## heading if missing). Use either heading or headingPath; mutually exclusive with blockId."
@@ -183,7 +183,7 @@
       }
     },
     "delete_note": {
-      "description": "Safely move an existing Markdown note into the vault trash (.trash) instead of permanent deletion. Verifies the target, obeys vault write policies, and requires Cindy confirmation.",
+      "description": "Safely move an existing Markdown note into the vault trash (.trash) instead of permanent deletion. Does not run right away: it checks the target, shows a confirmation card in the conversation and returns status=\"awaiting_confirmation\" with a confirmationId. The file moves only after the user clicks the card on the device they are using (valid 10 minutes). Ask the user to click, do not call again, and check with confirmation_status. Obeys vault write rules.",
       "parameters": {
         "/properties/path": {
           "description": "Vault-relative path of the existing Markdown note to move to trash."
@@ -193,6 +193,14 @@
         },
         "/properties/idempotencyKey": {
           "description": "Optional idempotency key to prevent duplicate requests on retry."
+        }
+      }
+    },
+    "confirmation_status": {
+      "description": "Read the outcome of a confirmation card. Call it after delete_note or an overwrite returned awaiting_confirmation, once the user says they clicked or the next step depends on it. state: pending, executing, done, cancelled, expired, failed (nothing ran), unconfirmed (check the file) or missing.",
+      "parameters": {
+        "/properties/confirmationId": {
+          "description": "The confirmationId returned by the original tool."
         }
       }
     },
@@ -263,10 +271,10 @@
       }
     },
     "canvas_ops": {
-      "description": "List, read, create, losslessly upsert, or overwrite Obsidian .canvas boards (supports text/file/link/group nodes and preserves existing custom fields; overwrite requires confirmation).",
+      "description": "List, read, create, losslessly upsert, or overwrite Obsidian .canvas boards (supports text/file/link/group nodes and preserves existing custom fields; overwrite of an existing board runs only after the user clicks the confirmation card).",
       "parameters": {
         "/properties/action": {
-          "description": "list, read, create (fails if exists), upsert (creates if missing or merges by id), or overwrite (requires confirmation)."
+          "description": "list, read, create (fails if exists), upsert (creates if missing or merges by id), or overwrite (runs after the user clicks the confirmation card)."
         },
         "/properties/path": {
           "description": "Vault-relative .canvas file path."
@@ -333,6 +341,17 @@
     "pick_vault_dir": {
       "description": "Workbench only: open the system folder picker to register and select the default Obsidian vault. Models should call open_workbench."
     },
+    "add_vault_path": {
+      "description": "Workbench only: register and select a vault from a typed folder path, for users who cannot reach the folder picker on the vault computer. The path is checked first and added after the user confirms in the workbench.",
+      "parameters": {
+        "/properties/path": {
+          "description": "Full path of the vault folder on the vault computer."
+        },
+        "/properties/confirmed": {
+          "description": "True once the user has confirmed the checked path in the workbench."
+        }
+      }
+    },
     "write_receipt": {
       "description": "Workbench only: check read-only whether a previous note or daily note write request was saved.",
       "parameters": {
@@ -348,7 +367,7 @@
       }
     },
     "set_vault_write_policy": {
-      "description": "Workbench only: save a registered vault's read-only toggle and allowed write folders after Cindy confirmation.",
+      "description": "Workbench only: save a registered vault's read-only toggle and allowed write folders after the user confirms in the workbench.",
       "parameters": {
         "/properties/vault": {
           "description": "Registered target vault."
@@ -361,6 +380,9 @@
         },
         "/properties/folders": {
           "description": "Vault-relative folder paths (including subfolders); empty list blocks all writes when restricted."
+        },
+        "/properties/confirmed": {
+          "description": "True once the user has confirmed these rules in the workbench."
         }
       }
     },

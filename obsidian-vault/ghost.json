@@ -17,10 +17,11 @@
     "ko": "locales/ko.json"
   },
   "version": "1.1.4",
-  "releaseNotes": "相较 1.1.3：Obsidian 正在运行、已在「设置 → 通用」打开命令行界面且该知识库已打开时，反向链接、双链是否有效、全库标签数量和今日日记路径改由 Obsidian 官方命令行查询，结果与 Obsidian 界面一致；否则照常读取文件。插件只调用固定的几条查询命令和打开笔记，写入、移动和删除仍直接操作文件。「在 Obsidian 中打开」改按知识库 ID 定位，同名知识库不再打开错误的库。",
+  "releaseNotes": "相较 1.1.3：（1）移入回收站、整篇覆盖笔记和整板替换白板时，对话里会出现确认卡片，在你正在使用的设备上点击后才执行，远程控制知识库所在电脑时也一样；卡片 10 分钟内有效、只能用一次，期间目标被修改、移动或删除则不执行。本版本因此新增聊天卡片能力。工作台里修改写入规则改为在页面内确认；新增按路径添加知识库（仅限含 .obsidian 的文件夹）。（2）Obsidian 正在运行、已在「设置 → 通用」打开命令行界面且该知识库已打开时，反向链接、双链是否有效、全库标签数量和今日日记路径直接向 Obsidian 查询，否则照常读取文件；写入、移动和删除仍直接操作文件。（3）「在 Obsidian 中打开」按知识库 ID 定位；官方命令行打开失败时改用链接方式打开，不再误报成功。",
   "entry": "main.js",
   "launch": "on-demand",
   "command": "obsidian",
+  "card": {},
   "confirm": true,
   "form": true,
   "pick": true,
@@ -244,7 +245,7 @@
     },
     {
       "name": "write_note",
-      "description": "创建新笔记或进行结构化写入：整篇覆盖、文末追加、文首前置、按章节或 ^块 ID 增改，以及更新非标签 YAML Frontmatter。伙伴对话中新建且未指定目录（或位于收件箱）的笔记会放进该伙伴的专属文件夹，结果返回实际路径。局部字面替换请用 replace_in_note，修改已有笔记标签请用 manage_tags，移入回收站请用 delete_note，记录每日日记请用 daily_note。覆盖已有笔记前需用户确认。",
+      "description": "创建新笔记或进行结构化写入：整篇覆盖、文末追加、文首前置、按章节或 ^块 ID 增改，以及更新非标签 YAML Frontmatter。伙伴对话中新建且未指定目录（或位于收件箱）的笔记会放进该伙伴的专属文件夹，结果返回实际路径。局部字面替换请用 replace_in_note，修改已有笔记标签请用 manage_tags，移入回收站请用 delete_note，记录每日日记请用 daily_note。整篇覆盖已有笔记不会立即执行：对话中出现确认卡片，结果为 status=\"awaiting_confirmation\"，用户点击卡片后插件才写入。",
       "parameters": {
         "type": "object",
         "properties": {
@@ -267,7 +268,7 @@
               "replace-block",
               "update-frontmatter"
             ],
-            "description": "写入方式（默认 create）：create=仅新建；overwrite=整篇覆盖（需确认）；append/prepend=文末追加或文首前置；append-heading/prepend-heading/replace-section=按 heading 或 headingPath 章节写入；append-block/prepend-block/replace-block=按 blockId 块写入；update-frontmatter=增量更新非标签属性。"
+            "description": "写入方式（默认 create）：create=仅新建；overwrite=整篇覆盖（用户在确认卡片上点击后执行）；append/prepend=文末追加或文首前置；append-heading/prepend-heading/replace-section=按 heading 或 headingPath 章节写入；append-block/prepend-block/replace-block=按 blockId 块写入；update-frontmatter=增量更新非标签属性。"
           },
           "heading": {
             "type": "string",
@@ -391,7 +392,7 @@
     },
     {
       "name": "delete_note",
-      "description": "将指定 Markdown 笔记安全移入知识库回收站（.trash），而非直接物理删除。执行前会核验目标并弹出 Cindy 确认框；受知识库只读与目录写入规则保护。",
+      "description": "将指定 Markdown 笔记安全移入知识库回收站（.trash），而非直接物理删除。不会立即执行：核验目标后在对话中放出确认卡片并返回 status=\"awaiting_confirmation\" 与 confirmationId，用户在正在使用的设备上点击后插件才移动文件（10 分钟内有效）。请让用户点卡片，不要重复调用；用 confirmation_status 核对结果。受知识库只读与目录写入规则保护。",
       "parameters": {
         "type": "object",
         "additionalProperties": false,
@@ -411,6 +412,25 @@
             "type": "string",
             "maxLength": 128,
             "description": "可选：防重试重复处理的幂等请求编号。"
+          }
+        }
+      }
+    },
+    {
+      "name": "confirmation_status",
+      "description": "只读查询确认卡片的结果。delete_note、整篇覆盖和整板替换返回 awaiting_confirmation 后，在用户表示已点击卡片、或后续步骤依赖结果时调用。state：pending=尚未点击，done=已执行，cancelled=用户取消，expired=已过期，failed=未执行，executing=执行中，unconfirmed=结果需核对，missing=找不到记录。",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "confirmationId"
+        ],
+        "properties": {
+          "confirmationId": {
+            "type": "string",
+            "minLength": 32,
+            "maxLength": 32,
+            "description": "原工具结果返回的 confirmationId。"
           }
         }
       }
@@ -541,7 +561,7 @@
     },
     {
       "name": "canvas_ops",
-      "description": "列出、读取、新建、增量合并或整板替换 Obsidian Canvas 思维白板（.canvas 文件），支持 text/file/link/group 节点并完整保留已有扩展属性。整板替换（overwrite）前需用户确认。",
+      "description": "列出、读取、新建、增量合并或整板替换 Obsidian Canvas 思维白板（.canvas 文件），支持 text/file/link/group 节点并完整保留已有扩展属性。整板替换（overwrite）已有白板不会立即执行：对话中出现确认卡片，用户点击后插件才替换。",
       "parameters": {
         "type": "object",
         "properties": {
@@ -554,7 +574,7 @@
               "upsert",
               "overwrite"
             ],
-            "description": "list=列出全库白板；read=读取白板 JSON；create=仅新建（同名报错）；upsert=不存在则新建、已存在则按 id 无损合并更新节点与连线；overwrite=整板替换（需用户确认）。"
+            "description": "list=列出全库白板；read=读取白板 JSON；create=仅新建（同名报错）；upsert=不存在则新建、已存在则按 id 无损合并更新节点与连线；overwrite=整板替换（用户在确认卡片上点击后执行）。"
           },
           "path": {
             "type": "string",
@@ -686,6 +706,29 @@
       }
     },
     {
+      "name": "add_vault_path",
+      "description": "仅供工作台调用：按用户输入的文件夹路径登记并切换默认知识库，用于无法操作知识库所在电脑目录选择框的情况。先核验路径，用户在工作台内确认后再登记。",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "path"
+        ],
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024,
+            "description": "知识库所在电脑上的知识库文件夹完整路径。"
+          },
+          "confirmed": {
+            "type": "boolean",
+            "description": "用户已在工作台内确认核验后的路径时为 true。"
+          }
+        }
+      }
+    },
+    {
       "name": "write_receipt",
       "description": "仅供工作台调用：按知识库 ID、原写入工具与请求编号，只读核对一次笔记或日记写入是否已落盘。",
       "parameters": {
@@ -720,7 +763,7 @@
     },
     {
       "name": "set_vault_write_policy",
-      "description": "仅供工作台调用：经 Cindy 确认后保存已登记知识库的只读开关和允许写入目录范围。",
+      "description": "仅供工作台调用：用户在工作台内确认后，保存已登记知识库的只读开关和允许写入目录范围。",
       "parameters": {
         "type": "object",
         "additionalProperties": false,
@@ -728,7 +771,8 @@
           "vault",
           "readOnly",
           "restrictFolders",
-          "folders"
+          "folders",
+          "confirmed"
         ],
         "properties": {
           "vault": {
@@ -751,6 +795,10 @@
               "maxLength": 240
             },
             "description": "相对于知识库的目录路径列表（包含其子目录）；限制模式下传空数组表示禁止所有写入。"
+          },
+          "confirmed": {
+            "type": "boolean",
+            "description": "用户已在工作台内确认本次规则时为 true。"
           }
         }
       }
@@ -898,6 +946,11 @@
             "model"
           ]
         },
+        "confirmation_status": {
+          "visibility": [
+            "model"
+          ]
+        },
         "manage_tags": {
           "visibility": [
             "model",
@@ -932,6 +985,11 @@
           ]
         },
         "pick_vault_dir": {
+          "visibility": [
+            "app"
+          ]
+        },
+        "add_vault_path": {
           "visibility": [
             "app"
           ]

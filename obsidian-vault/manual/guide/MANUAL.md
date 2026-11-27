@@ -11,13 +11,13 @@
 | 按关键词、目录、标签或属性检索笔记 | `search_notes` | 返回相关性排序、游标 `nextCursor` 及正文命中行列 |
 | 统计全库所有标签与使用频次 | `list_tags` | 覆盖 Frontmatter 与正文 `#标签`，支持 `prefix` 前缀过滤 |
 | 读取单篇笔记、指定章节或 `^块ID` | `read_note` | 同时返回 `frontmatter`、`tags`、`headings[].path`、直接出链与反链 |
-| 新建、整篇覆盖、追加/前置、整节/整块改写、改非标签属性 | `write_note` | 覆盖已有笔记需用户确认；**不用于删除或修改已有笔记标签** |
+| 新建、整篇覆盖、追加/前置、整节/整块改写、改非标签属性 | `write_note` | 覆盖已有笔记需用户点确认卡片；**不用于删除或修改已有笔记标签** |
 | 在已有正文、章节或块中精确字面替换片段 | `replace_in_note` | 保留 Frontmatter，默认唯一命中，支持 `dryRun` 与 `expectedMtimeMs` |
-| 将已有笔记移入知识库回收站（`.trash`） | `delete_note` | 安全移入 `.trash`，执行前需 Cindy 弹窗确认 |
+| 将已有笔记移入知识库回收站（`.trash`） | `delete_note` | 安全移入 `.trash`，用户点确认卡片后才执行 |
 | 查看、添加或移除单篇笔记的 Frontmatter 标签 | `manage_tags` | 完整标签名大小写不敏感匹配，不误删子标签，保留正文与其他属性 |
 | 读写或向每日日记追加时间戳记录/待办 | `daily_note` | 自动遵循 `.obsidian/daily-notes.json` 或插件设置的目录、日期格式与模板 |
 | 查未连接提及、二跳关联、全库核心枢纽或孤立笔记 | `graph_links` | 仅 `note` / `hubs` / `orphans` 三种纯图谱模式 |
-| 列出、读取、新建、合并或替换 `.canvas` 白板 | `canvas_ops` | 仅 `list` / `read` / `create` / `upsert` / `overwrite`；`overwrite` 需确认 |
+| 列出、读取、新建、合并或替换 `.canvas` 白板 | `canvas_ops` | 仅 `list` / `read` / `create` / `upsert` / `overwrite`；`overwrite` 需用户点确认卡片 |
 | 在桌面端 Obsidian 应用打开文件或知识库 | `open_in_obsidian` | 库已在 Obsidian 中打开且官方 CLI 可用时用 CLI，否则精确路径 `obsidian://` URI |
 | 在 Cindy 内打开可视化交互工作台 | `open_workbench` | 用于让用户图形化浏览、保存笔记、记录日记或调整写入规则 |
 
@@ -30,9 +30,9 @@
 1. **仅限已登记 Vault 访问**：工具只访问 `obsidian.json` 中已注册或用户在工作台「添加知识库」亲选的目录，拦截 `.obsidian`/`.git`/`.trash` 与符号链接。用户明确指定另一库时，传其 ID 或精确路径。
 2. **尊重按库写入规则**：`vault_status` 返回当前库的 `writePolicy`。`readOnly: true` 禁止所有写入与移入回收站；`writeFolders: null` 表示全库可写，空数组表示全库禁写，目录数组只允许对应目录及子目录。遇到 `VAULT_READ_ONLY` 或 `WRITE_OUTSIDE_ALLOWED_FOLDERS` 时如实向用户报告，不要绕过。
 3. **伙伴专属文件夹**：在伙伴的主对话中，`vault_status` 返回 `summary.companion` 与 `summary.defaultFolder`。`write_note` 的 `create` 若只给文件名或路径在收件箱下，会自动放进该伙伴的文件夹，结果带 `redirectedFrom`；明确写了其他目录时保持原路径。其他写入模式不改路径。伙伴文件夹由用户在工作台「伙伴专属文件夹」中设置，模型无需也不能自行传入。
-4. **非破坏性编辑与确认弹窗**：
+4. **非破坏性编辑与确认卡片**：
    - `write_note` 的追加、前置与章节编辑自动识别 ``` 与 ~~~ 代码围栏，绝不误切代码块内的 `#` 注释，并在未传 `frontmatter` 时逐字节保留原 YAML Frontmatter；
-   - `write_note(mode="overwrite")`、`delete_note` 以及 `canvas_ops(action="overwrite")` 会先核验真实目标并弹出 Cindy 确认框；用户取消时请尊重取消结果。
+   - `write_note(mode="overwrite")`、`delete_note` 以及 `canvas_ops(action="overwrite")` 对已有文件**不会当场执行**：工具核验目标后在对话里放出确认卡片，返回 `status: "awaiting_confirmation"`、`committed: false` 和 `confirmationId`。此时要如实告诉用户“尚未执行，请在你正在用的设备上点卡片”，不要说已经完成，不要重复调用同一操作，也不要用任何方式替用户点击。用户说点过了，或后续步骤依赖结果时，调用 `confirmation_status({ confirmationId })`：只有 `state: "done"` 表示已执行；`pending` 表示还没点；`cancelled` 要尊重取消；`expired`（10 分钟）和 `failed`（例如确认期间文件被改过）没有做任何修改，需要时先征得用户同意再重新发起；`unconfirmed` 要先核对目标文件。有多个待确认操作时逐个说明。
 
 ## 3. 常见多工具协作流程
 
